@@ -93,6 +93,15 @@ tail -n 50 -f "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train
 
 看到 `FORMAL_TRAINING_START` 表示测速已退出并开始正式训练启动流程，不代表初始化已经完成。约 10 秒/步时，纯训练耗时约 5 小时 33 分，另加初始化与 checkpoint 保存。500、1000、1500、2000 步保存到本次独立目录。启动器等训练退出后检查这四个非空权重文件，成功时写入 `completed.json` 并输出 `FORMAL_TRAINING_COMPLETE`；仅检查文件存在及大小，不替代加载验证或任务评测。权重文件保存沿用训练仓库实现，并不额外添加优化器保存或精确断点续训能力。
 
+正式运行同时在本次目录写入 `gpu_monitor.log`，约每两秒采样一次 GPU 3～6 的显存、利用率和可见进程，并记录目标仓库 `train.py` 的 PID。训练前后也各采样一次，退出时停止采样。驱动查询失败会记录诊断错误，不调整训练配置。`nvidia-smi` 可能因容器/PID 可见性而省略部分进程，因此进程占用之和不一定等于整卡占用。torchrun 通过 `--tee 3 --log-dir` 同时保留各 rank 的 stdout/stderr 到 `rank_logs/`，主日志照常可见。
+
+如果再次 OOM，保留本次目录，查看失败前的采样和各 rank 的异常；不要仅用退出后的空闲显存判断失败时的占用：
+
+```bash
+tail -n 220 "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_dir.txt)/gpu_monitor.log"
+grep -RIn -B 4 -A 8 'OutOfMemoryError' "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_dir.txt)/rank_logs"
+```
+
 查看本次已生成的 checkpoint：
 
 ```bash

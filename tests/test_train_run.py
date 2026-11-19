@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+from contextlib import nullcontext
 
 
 MODULE = Path(__file__).resolve().parents[1] / 'train_run.py'
@@ -25,7 +26,8 @@ class FormalTrainingTests(unittest.TestCase):
         for text in ['n_gpu=4', 'bs=32', 'save_interval=500', '--vla.max_steps 2000',
                      '--vla.global_batch_size 128', '--vla.learning_rate 2e-5', '--group_size 16',
                      'CUDA_VISIBLE_DEVICES=GPU-3,GPU-4,GPU-5,GPU-6 ',
-                     '--master_port=29834 train.py', 'is_resume=False', 'resume_step=0', 'resume_epoch=0']:
+                     '--master_port=29834', '--tee 3', '--log-dir',
+                     'is_resume=False', 'resume_step=0', 'resume_epoch=0']:
             self.assertIn(text, launcher)
         self.assertNotIn('--worker', launcher)
         self.assertNotIn('perf_compare.py', launcher)
@@ -48,6 +50,20 @@ class FormalTrainingTests(unittest.TestCase):
             self.assertEqual(args[args.index('--save_interval') + 1], '500')
             self.assertEqual(args[args.index('--vla.max_steps') + 1], '2000')
             self.assertEqual(args[args.index('--vla.global_batch_size') + 1], '128')
+            self.assertEqual(args[args.index('--tee') + 1], '3')
+
+    def test_gpu_snapshots_keep_process_ids_and_survive_monitor_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            directory = Path(d)
+            with patch.object(self.mod.subprocess, 'run', return_value=SimpleNamespace(stdout='GPU 6: PID 777 memory 100000 MiB\n', stderr='')), \
+                 patch.object(self.mod, 'training_processes', return_value={123: 'train worker'}):
+                self.mod.record_gpu_snapshot(directory, Path('/data/MemoryVLA'))
+            log = (directory / 'gpu_monitor.log').read_text()
+            self.assertIn('PID 777', log)
+            self.assertIn('train.py PIDs: [123]', log)
+            with patch.object(self.mod.subprocess, 'run', side_effect=OSError('nvidia-smi unavailable')):
+                self.mod.record_gpu_snapshot(directory, Path('/data/MemoryVLA'))
+            self.assertIn('nvidia-smi unavailable', (directory / 'gpu_monitor.log').read_text())
 
     def test_stop_scope_excludes_video_jobs_other_roots_and_other_tools(self):
         root = Path('/data/MemoryVLA').resolve()
@@ -112,6 +128,7 @@ class FormalTrainingTests(unittest.TestCase):
                      patch.object(self.mod, 'resolve_devices', return_value=['GPU-3', 'GPU-4', 'GPU-5', 'GPU-6']), \
                      patch.object(self.mod, 'stop_benchmarks', side_effect=lambda root: order.append('stop')), \
                      patch.object(self.mod, 'training_processes', return_value=old_training), \
+                     patch.object(self.mod, 'monitor_gpu', return_value=nullcontext()), \
                      patch.object(self.mod.subprocess, 'run'), \
                      patch.object(self.mod.subprocess, 'Popen', side_effect=launch) as popen, \
                      patch.object(self.mod.signal, 'signal'), patch('sys.stdout', io.StringIO()):

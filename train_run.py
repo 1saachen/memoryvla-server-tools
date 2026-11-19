@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Start the agreed 4-GPU, batch-128, 2000-step RoboMME training run."""
 import argparse
+from contextlib import contextmanager
 from datetime import datetime
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from perf_compare import make_launcher, resolve_devices, start_id, training_processes
@@ -25,7 +28,8 @@ def make_training_launcher(original, directory, devices):
         (r'^[ \t]*resume_step=.*$', 'resume_step=0'),
         (r'^[ \t]*resume_epoch=.*$', 'resume_epoch=0'),
         (r'--vla\.max_steps 100\b', '--vla.max_steps 2000'),
-        (r'--master_port=29824[^\n]*', '--master_port=29834 train.py \\'),
+        (r'--master_port=29824[^\n]*', '--master_port=29834 --log-dir ' +
+         shlex.quote(str(directory / 'rank_logs')) + ' --tee 3 train.py \\'),
     ]
     for pattern, replacement in replacements:
         text, count = re.subn(pattern, lambda match: replacement, text, flags=re.MULTILINE)
@@ -87,6 +91,36 @@ def check_checkpoints(directory):
     return checkpoints
 
 
+def record_gpu_snapshot(directory, root):
+    try:
+        result = subprocess.run(['nvidia-smi', '-i', '3,4,5,6'], capture_output=True,
+                                text=True, timeout=5, check=False)
+        details = f'train.py PIDs: {sorted(training_processes(root))}\n{result.stdout}{result.stderr or ""}'
+    except (OSError, subprocess.SubprocessError) as error:
+        details = f'GPU monitor error: {error}\n'
+    with (directory / 'gpu_monitor.log').open('a') as output:
+        output.write(f'\n{datetime.now().isoformat()}\n{details}')
+
+
+@contextmanager
+def monitor_gpu(directory, root):
+    stop = threading.Event()
+
+    def sample():
+        while not stop.wait(2):
+            record_gpu_snapshot(directory, root)
+
+    record_gpu_snapshot(directory, root)
+    thread = threading.Thread(target=sample, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=6)
+        record_gpu_snapshot(directory, root)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
@@ -131,20 +165,21 @@ def main(argv=None):
             raise SystemExit(128 + signum)
 
         signal.signal(signal.SIGTERM, interrupted)
-        child = subprocess.Popen(['bash', str(launcher)], cwd=root, env=env, start_new_session=True)
-        try:
-            code = child.wait()
-        except BaseException:
+        with monitor_gpu(directory, root):
+            child = subprocess.Popen(['bash', str(launcher)], cwd=root, env=env, start_new_session=True)
             try:
-                os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                child.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait()
-            raise
+                code = child.wait()
+            except BaseException:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                raise
         print(f'TRAIN_EXIT_CODE={code}', flush=True)
         if code:
             raise SystemExit(code if code > 0 else 128 - code)
