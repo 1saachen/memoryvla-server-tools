@@ -23,6 +23,7 @@ class BenchmarkTests(unittest.TestCase):
             ([], [2, 4], 0, 'COMPARISON_COMPLETE'),
             (['--gpus', '4'], [4], 0, 'BENCHMARK_COMPLETE'),
             (['--gpus', '4'], [4], 1, 'BENCHMARK_INCOMPLETE'),
+            (['--gpus', '1'], [1], 0, 'BENCHMARK_COMPLETE'),
         ]:
             with self.subTest(extra=extra, code=code), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
@@ -40,7 +41,7 @@ class BenchmarkTests(unittest.TestCase):
                         run_dir.mkdir(parents=True)
                         (run_dir / 'config.json').write_text(json.dumps({
                             'group_size': 16, 'vla': {'expected_world_size': cards,
-                            'per_device_batch_size': 64 // cards, 'global_batch_size': 64}}))
+                            'per_device_batch_size': 16 if cards == 1 else 64 // cards, 'global_batch_size': 64}}))
                         rows = [{'VLA Train/Step': s, 'VLA Train/Step Time': 2,
                                  'VLA Train/Loss': 0.01} for s in range(1, 101)]
                         (run_dir / f'{run_dir.name}.jsonl').write_text(
@@ -67,6 +68,36 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertEqual(sorted(p.name for p in directory.glob('perf*.sh')),
                                  [f'perf{c}.sh' for c in expected])
                 self.assertEqual([r['gpus'] for r in json.loads((directory / 'summary.json').read_text())], expected)
+                if expected == [1] and code == 0:
+                    script = (directory / 'perf1.sh').read_text()
+                    self.assertIn('bs=16', script)
+                    self.assertIn('--vla.global_batch_size 64', script)
+                    self.assertIn('CUDA_VISIBLE_DEVICES=0 ', script)
+                    result = json.loads((directory / 'summary.json').read_text())[0]
+                    self.assertEqual(result['gradient_accumulation_steps'], 4)
+
+    def test_single_gpu_worker_uses_no_shard_without_changing_multi_gpu(self):
+        for world_size in ('1', '2'):
+            class Strategy:
+                def __init__(self, marker):
+                    self.marker = marker
+                    self.fsdp_sharding_strategy = 'hybrid'
+
+            fake_module = SimpleNamespace(FSDPStrategy=Strategy)
+            fake_fsdp = SimpleNamespace(ShardingStrategy=SimpleNamespace(NO_SHARD='no_shard'))
+
+            def train(*args, **kwargs):
+                strategy = Strategy('passed through')
+                self.assertEqual(strategy.marker, 'passed through')
+                self.assertEqual(strategy.fsdp_sharding_strategy,
+                                 'no_shard' if world_size == '1' else 'hybrid')
+
+            with patch.dict('sys.modules', {'training.strategies.fsdp': fake_module,
+                                           'torch.distributed.fsdp': fake_fsdp}), \
+                 patch.dict(self.mod.os.environ, {'WORLD_SIZE': world_size}), \
+                 patch.object(self.mod.sys, 'argv', ['perf_compare.py', '--worker']), \
+                 patch('runpy.run_path', side_effect=train):
+                self.mod.run_worker()
 
     def test_launcher_preserves_training_options_and_complete_groups(self):
         original = (MODULE.parent / 'tests/fixtures/train.sh').read_text(encoding='utf-8')

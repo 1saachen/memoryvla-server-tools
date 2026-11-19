@@ -14,6 +14,8 @@ import sys
 import time
 from datetime import datetime
 
+BATCH_PER_GPU = {1: 16, 2: 32, 4: 16}
+
 
 def make_launcher(original, directory, cards, batch):
     text = original
@@ -34,6 +36,7 @@ def make_launcher(original, directory, cards, batch):
     required(r'--master_port(?:=|[ \t]+)\d+', f'--master_port={29820 + cards}')
     required(r'(?<![\w/])train\.py(?=\s)', shlex.quote(str(Path(__file__).resolve())) + ' --worker')
     required(r'--vla\.max_steps[ \t]+\d+', '--vla.max_steps 100')
+    required(r'--vla\.global_batch_size[ \t]+[^\n]*', '--vla.global_batch_size 64 \\')
     # Discard W&B/old tracker and group settings in this generated copy only.
     text = re.sub(r'^[ \t]*--(?:wandb_project|wandb_entity|trackers|group_size)(?:[ \t]+|=)[^\n]*\n?', '', text, flags=re.MULTILINE)
     required(r'^[ \t]*--hf_token(?:[ \t]+|=)[^\n]*$', '  --trackers \'["jsonl"]\' \\\n  --group_size 16 \\\n  --hf_token "${hf_token}" \\')
@@ -105,6 +108,18 @@ def run_worker():
     sys.path.insert(0, str(Path.cwd()))
     from training.strategies.fsdp import FSDPStrategy
     FSDPStrategy.save_checkpoint = lambda *args, **kwargs: None
+    if os.environ.get('WORLD_SIZE') == '1':
+        from functools import wraps
+        from torch.distributed.fsdp import ShardingStrategy
+        original_init = FSDPStrategy.__init__
+
+        @wraps(original_init)
+        def single_gpu_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            self.fsdp_sharding_strategy = ShardingStrategy.NO_SHARD
+
+        FSDPStrategy.__init__ = single_gpu_init
+        print('Single GPU benchmark: FSDP NO_SHARD; full model and optimizer stay on one GPU.', flush=True)
     sys.argv = ['train.py'] + sys.argv[2:]
     import runpy
     runpy.run_path('train.py', run_name='__main__')
@@ -114,7 +129,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--stop-existing', action='store_true', help='SIGTERM train.py jobs whose cwd is exactly this repository')
-    parser.add_argument('--gpus', type=int, choices=(2, 4), help='Run only this GPU count; default: compare 2 then 4 GPUs')
+    parser.add_argument('--gpus', type=int, choices=(1, 2, 4), help='Run only this GPU count; default: compare 2 then 4 GPUs. Single GPU: batch 16, accumulation 4, global batch 64')
     args = parser.parse_args(argv)
     configurations = (args.gpus,) if args.gpus else (2, 4)
     if sys.platform != 'linux':
@@ -133,7 +148,7 @@ def main(argv=None):
         directory.mkdir()
         for cards in configurations:
             launcher = directory / f'perf{cards}.sh'
-            launcher.write_text(make_launcher(original, directory, cards, 64 // cards))
+            launcher.write_text(make_launcher(original, directory, cards, BATCH_PER_GPU[cards]))
             subprocess.run(['bash', '-n', str(launcher)], check=True)
         (logs / 'latest_perf_dir.txt').write_text(str(directory) + '\n')
         env = os.environ.copy()
@@ -147,7 +162,9 @@ def main(argv=None):
             raise RuntimeError('Existing training found; use --stop-existing to discard that run')
         results = []
         for cards in configurations:
-            print(f'Starting {cards} GPUs, batch/GPU={64 // cards}; log={directory / ("perf"+str(cards)+".log")}', flush=True)
+            batch = BATCH_PER_GPU[cards]
+            accumulation = 64 // (cards * batch)
+            print(f'Starting {cards} GPUs, batch/GPU={batch}, accumulation={accumulation}, global batch=64; log={directory / ("perf"+str(cards)+".log")}', flush=True)
             with (directory / f'perf{cards}.log').open('w') as output:
                 child = subprocess.Popen(['bash', str(directory / f'perf{cards}.sh')], cwd=root,
                                          env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -162,7 +179,7 @@ def main(argv=None):
                         child.wait()
                     raise
             if code:
-                results.append(dict(gpus=cards, batch_per_gpu=64 // cards, status='failed', exit_code=code))
+                results.append(dict(gpus=cards, batch_per_gpu=batch, status='failed', exit_code=code))
                 (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
                 print(f'{cards}-GPU run failed (exit {code}); see its log.', flush=True)
                 continue
@@ -172,9 +189,10 @@ def main(argv=None):
             run_dir = run_dirs[0]
             cfg = json.loads((run_dir / 'config.json').read_text())
             vla = cfg['vla']
-            if (vla['expected_world_size'], vla['per_device_batch_size'], vla['global_batch_size'], cfg['group_size']) != (cards, 64 // cards, 64, 16):
+            if (vla['expected_world_size'], vla['per_device_batch_size'], vla['global_batch_size'], cfg['group_size']) != (cards, batch, 64, 16):
                 raise ValueError('Actual training configuration does not match the comparison')
-            result = dict(gpus=cards, batch_per_gpu=64 // cards, status='passed', **summarize(run_dir / f'{run_dir.name}.jsonl'))
+            result = dict(gpus=cards, batch_per_gpu=batch, gradient_accumulation_steps=accumulation,
+                          status='passed', **summarize(run_dir / f'{run_dir.name}.jsonl'))
             results.append(result)
             (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
             print(json.dumps(result), flush=True)

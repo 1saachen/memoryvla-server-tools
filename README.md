@@ -4,8 +4,9 @@
 
 ## 对照方式
 
-- 默认依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。加 `--gpus 4` 只测四卡，加 `--gpus 2` 只测两卡。
-- 两组总 batch 均为 64，`group_size=16`，shuffle buffer 为 1024。
+- 默认依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。加 `--gpus 4` 只测四卡，加 `--gpus 2` 只测两卡，加 `--gpus 1` 只测 GPU 0。
+- 总 batch 均为 64，`group_size=16`，shuffle buffer 为 1024。单卡每次前后向 batch 16，梯度累积 4 次；两卡、四卡无需梯度累积。
+- 单卡测速子进程使用 FSDP `NO_SHARD`，完整模型、梯度和优化器驻留一张卡；实际显存是否足够需要服务器验证，显存不足会记录为失败。
 - 从训练仓库的 `script/train/robomme/train.sh` 生成临时启动脚本，保留学习率、数据和初始权重等配置。
 - 各运行 100 步，排除前 20 步，统计后 80 步的平均/中位耗时、吞吐量，并检查 loss 为有限数值。
 - 仅在测速子进程中禁用 checkpoint 写入，避免终止步骤的权重保存干扰测速。正式训练代码、启动脚本、数据和已有产物不改动。
@@ -37,6 +38,13 @@ mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { perf_log="/data/emb
 
 后台进程显式使用所选 Python 环境，其中的 `torchrun` 也通过 PATH 优先使用。缓存默认放在训练仓库上一级的 `hf_cache`，默认端点是 `https://huggingface.co`；已有 `HF_HOME`、`HF_ENDPOINT` 环境变量优先生效。训练启动脚本中的 export 也会作用于训练进程。
 
+只测单卡时，把上述命令中的 `--gpus 4` 改成 `--gpus 1`。需要先结束上一轮测速，可执行下面的命令；它匹配此工具的绝对路径，向测速主进程和 workers 发送 SIGTERM。再次执行 `pgrep` 无输出后再启动下一轮，以免与旧测速重叠。
+
+```bash
+pkill -TERM -f '[/]data/embodied-ai/yaolin/memoryvla-server-tools/perf_compare[.]py'
+pgrep -af '[/]data/embodied-ai/yaolin/memoryvla-server-tools/perf_compare[.]py'
+```
+
 ## 日志和结果
 
 总体进度：
@@ -45,7 +53,9 @@ mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { perf_log="/data/emb
 tail -n 50 -f "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_log.txt)"
 ```
 
-各组详细日志和 NCCL 信息位于结果目录的 `perf2.log`、`perf4.log`。每组包括初始化在内最多运行一小时。非零退出的配置会标记为失败，再尝试下一组；超时会清理本组进程并结束测试。
+各组详细日志和 NCCL 信息位于结果目录的 `perf1.log`、`perf2.log`、`perf4.log`。每组包括初始化在内最多运行一小时。非零退出的配置会标记为失败，再尝试下一组；超时会清理本组进程并结束测试。
+
+单卡以 `Global Step` 和 JSONL 为准：100 个参数更新步对应 400 个微批次，原训练进度条按微批次计数，可能超过 `100/100`。结果中的 `mean_step_seconds` 仍为处理总 batch 64 的一次参数更新耗时，可与多卡比较；单卡 `gradient_accumulation_steps` 应为 4。
 
 ```bash
 cat "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_dir.txt)/summary.json"
