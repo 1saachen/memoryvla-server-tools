@@ -4,7 +4,7 @@
 
 ## 对照方式
 
-- 依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。
+- 默认依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。加 `--gpus 4` 只测四卡，加 `--gpus 2` 只测两卡。
 - 两组总 batch 均为 64，`group_size=16`，shuffle buffer 为 1024。
 - 从训练仓库的 `script/train/robomme/train.sh` 生成临时启动脚本，保留学习率、数据和初始权重等配置。
 - 各运行 100 步，排除前 20 步，统计后 80 步的平均/中位耗时、吞吐量，并检查 loss 为有限数值。
@@ -29,10 +29,10 @@ git -C /data/embodied-ai/yaolin/memoryvla-server-tools pull --ff-only
 
 `--stop-existing` 会向工作目录恰好为目标训练仓库的 Python/torchrun `train.py` 进程发送 SIGTERM，放弃其未保存进度。省略此参数时，发现已有训练就退出。不要对共享给其他任务的训练仓库使用该参数。旧进程 45 秒内未退出则停止测试，不自动强制杀进程。
 
-复制以下整行执行一次：
+下面这条只测四卡，适用于已停止两卡测试的情况。复制整行执行一次：
 
 ```bash
-mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { perf_log="/data/embodied-ai/yaolin/MemoryVLA/log/robomme/perf_driver_$(date +%Y%m%d_%H%M%S).log"; nohup /data/embodied-ai/yaolin/envs/memvla/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/perf_compare.py --root /data/embodied-ai/yaolin/MemoryVLA --stop-existing > "$perf_log" 2>&1 < /dev/null & perf_pid=$!; printf '%s\n' "$perf_pid" > "${perf_log%.log}.pid"; printf '%s\n' "$perf_log" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_log.txt; echo "测速 PID：$perf_pid；日志：$perf_log"; }
+mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { perf_log="/data/embodied-ai/yaolin/MemoryVLA/log/robomme/perf_driver_$(date +%Y%m%d_%H%M%S).log"; nohup /data/embodied-ai/yaolin/envs/memvla/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/perf_compare.py --root /data/embodied-ai/yaolin/MemoryVLA --gpus 4 > "$perf_log" 2>&1 < /dev/null & perf_pid=$!; printf '%s\n' "$perf_pid" > "${perf_log%.log}.pid"; printf '%s\n' "$perf_log" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_log.txt; echo "测速 PID：$perf_pid；日志：$perf_log"; }
 ```
 
 后台进程显式使用所选 Python 环境，其中的 `torchrun` 也通过 PATH 优先使用。缓存默认放在训练仓库上一级的 `hf_cache`，默认端点是 `https://huggingface.co`；已有 `HF_HOME`、`HF_ENDPOINT` 环境变量优先生效。训练启动脚本中的 export 也会作用于训练进程。
@@ -51,7 +51,7 @@ tail -n 50 -f "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_
 cat "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_dir.txt)/summary.json"
 ```
 
-只有两组均成功才输出 `COMPARISON_COMPLETE`；否则输出 `COMPARISON_INCOMPLETE` 或具体异常。结果中的 `mean_step_seconds` 越低越好，`samples_per_second` 越高越好。显存不足、网络失败、数据未就绪等情况需要根据详细日志处理。
+默认两组均成功才输出 `COMPARISON_COMPLETE`；否则输出 `COMPARISON_INCOMPLETE` 或具体异常。指定 `--gpus` 时，单组成功输出 `BENCHMARK_COMPLETE`，失败输出 `BENCHMARK_INCOMPLETE` 或具体异常。结果中的 `mean_step_seconds` 越低越好，`samples_per_second` 越高越好。显存不足、网络失败、数据未就绪等情况需要根据详细日志处理。
 
 ## 本地检查
 

@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -15,6 +16,57 @@ class BenchmarkTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('perf_compare', MODULE)
         cls.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.mod)
+
+    def test_selected_cases_launch_and_report_completion(self):
+        original = (MODULE.parent / 'tests/fixtures/train.sh').read_text(encoding='utf-8')
+        for extra, expected, code, label in [
+            ([], [2, 4], 0, 'COMPARISON_COMPLETE'),
+            (['--gpus', '4'], [4], 0, 'BENCHMARK_COMPLETE'),
+            (['--gpus', '4'], [4], 1, 'BENCHMARK_INCOMPLETE'),
+        ]:
+            with self.subTest(extra=extra, code=code), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                source = root / 'script/train/robomme/train.sh'
+                source.parent.mkdir(parents=True)
+                source.write_text(original)
+                launched = []
+
+                def launch(command, **kwargs):
+                    launcher = Path(command[1])
+                    cards = int(launcher.stem.removeprefix('perf'))
+                    launched.append(cards)
+                    if code == 0:
+                        run_dir = launcher.parent / 'runs' / f'perf{cards}--image_aug'
+                        run_dir.mkdir(parents=True)
+                        (run_dir / 'config.json').write_text(json.dumps({
+                            'group_size': 16, 'vla': {'expected_world_size': cards,
+                            'per_device_batch_size': 64 // cards, 'global_batch_size': 64}}))
+                        rows = [{'VLA Train/Step': s, 'VLA Train/Step Time': 2,
+                                 'VLA Train/Loss': 0.01} for s in range(1, 101)]
+                        (run_dir / f'{run_dir.name}.jsonl').write_text(
+                            ''.join(json.dumps(r) + '\n' for r in rows))
+                    return SimpleNamespace(wait=lambda **kw: code)
+
+                fake_fcntl = SimpleNamespace(LOCK_EX=2, LOCK_NB=4, flock=lambda *a: None)
+                output = io.StringIO()
+                with patch.dict('sys.modules', {'fcntl': fake_fcntl}), \
+                     patch.object(self.mod.sys, 'platform', 'linux'), \
+                     patch.object(self.mod, 'training_processes', return_value={}), \
+                     patch.object(self.mod.subprocess, 'run'), \
+                     patch.object(self.mod.subprocess, 'Popen', side_effect=launch), \
+                     patch('sys.stdout', output):
+                    if code:
+                        with self.assertRaises(SystemExit) as error:
+                            self.mod.main(['--root', str(root)] + extra)
+                        self.assertEqual(error.exception.code, 1)
+                    else:
+                        self.mod.main(['--root', str(root)] + extra)
+                self.assertEqual(launched, expected)
+                self.assertIn(label + ':', output.getvalue())
+                directory = Path((root / 'log/robomme/latest_perf_dir.txt').read_text().strip())
+                self.assertEqual(sorted(p.name for p in directory.glob('perf*.sh')),
+                                 [f'perf{c}.sh' for c in expected])
+                self.assertEqual([r['gpus'] for r in json.loads((directory / 'summary.json').read_text())], expected)
 
     def test_launcher_preserves_training_options_and_complete_groups(self):
         original = (MODULE.parent / 'tests/fixtures/train.sh').read_text(encoding='utf-8')

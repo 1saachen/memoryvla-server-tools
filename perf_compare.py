@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run two isolated MemoryVLA throughput checks; Linux server, standard library only."""
+"""Run isolated MemoryVLA throughput checks; Linux server, standard library only."""
 import argparse
 import json
 import math
@@ -110,11 +110,13 @@ def run_worker():
     runpy.run_path('train.py', run_name='__main__')
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--stop-existing', action='store_true', help='SIGTERM train.py jobs whose cwd is exactly this repository')
-    args = parser.parse_args()
+    parser.add_argument('--gpus', type=int, choices=(2, 4), help='Run only this GPU count; default: compare 2 then 4 GPUs')
+    args = parser.parse_args(argv)
+    configurations = (args.gpus,) if args.gpus else (2, 4)
     if sys.platform != 'linux':
         parser.error('Run this script on the Linux training server')
     root = args.root.resolve()
@@ -129,9 +131,9 @@ def main():
             raise RuntimeError('Another throughput comparison is already running')
         directory = logs / datetime.now().strftime('perf_compare_%Y%m%d_%H%M%S_%f')
         directory.mkdir()
-        for cards, batch in ((2, 32), (4, 16)):
+        for cards in configurations:
             launcher = directory / f'perf{cards}.sh'
-            launcher.write_text(make_launcher(original, directory, cards, batch))
+            launcher.write_text(make_launcher(original, directory, cards, 64 // cards))
             subprocess.run(['bash', '-n', str(launcher)], check=True)
         (logs / 'latest_perf_dir.txt').write_text(str(directory) + '\n')
         env = os.environ.copy()
@@ -144,7 +146,7 @@ def main():
         elif training_processes(root):
             raise RuntimeError('Existing training found; use --stop-existing to discard that run')
         results = []
-        for cards in (2, 4):
+        for cards in configurations:
             print(f'Starting {cards} GPUs, batch/GPU={64 // cards}; log={directory / ("perf"+str(cards)+".log")}', flush=True)
             with (directory / f'perf{cards}.log').open('w') as output:
                 child = subprocess.Popen(['bash', str(directory / f'perf{cards}.sh')], cwd=root,
@@ -162,7 +164,7 @@ def main():
             if code:
                 results.append(dict(gpus=cards, batch_per_gpu=64 // cards, status='failed', exit_code=code))
                 (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
-                print(f'{cards}-GPU run failed (exit {code}); see its log. Continuing to the next configuration.', flush=True)
+                print(f'{cards}-GPU run failed (exit {code}); see its log.', flush=True)
                 continue
             run_dirs = list((directory / 'runs').glob(f'perf{cards}*'))
             if len(run_dirs) != 1:
@@ -177,13 +179,17 @@ def main():
             (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
             print(json.dumps(result), flush=True)
         passed = [r for r in results if r['status'] == 'passed']
-        if len(passed) == 2:
-            winner = min(passed, key=lambda r: r['mean_step_seconds'])
-            print(f'COMPARISON_COMPLETE: faster configuration={winner["gpus"]} GPUs; results={directory / "summary.json"}', flush=True)
+        if len(passed) == len(configurations):
+            if len(configurations) == 1:
+                print(f'BENCHMARK_COMPLETE: configuration={args.gpus} GPUs; results={directory / "summary.json"}', flush=True)
+            else:
+                winner = min(passed, key=lambda r: r['mean_step_seconds'])
+                print(f'COMPARISON_COMPLETE: faster configuration={winner["gpus"]} GPUs; results={directory / "summary.json"}', flush=True)
         else:
-            print(f'COMPARISON_INCOMPLETE: successful configurations={len(passed)}; results={directory / "summary.json"}', flush=True)
+            label = 'BENCHMARK_INCOMPLETE' if len(configurations) == 1 else 'COMPARISON_INCOMPLETE'
+            print(f'{label}: successful configurations={len(passed)}; results={directory / "summary.json"}', flush=True)
         print('No formal training was started. Compare these short-run results before choosing a training configuration.', flush=True)
-        if len(passed) != 2:
+        if len(passed) != len(configurations):
             raise SystemExit(1)
 
 
