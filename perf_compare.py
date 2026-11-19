@@ -14,10 +14,10 @@ import sys
 import time
 from datetime import datetime
 
-BATCH_PER_GPU = {1: 16, 2: 32, 4: 16}
+BATCH_PER_GPU = {1: 16, 2: 32, 4: 16, 8: 16}
 
 
-def make_launcher(original, directory, cards, batch):
+def make_launcher(original, directory, cards, batch, global_batch=64):
     text = original
 
     def required(pattern, replacement):
@@ -36,14 +36,14 @@ def make_launcher(original, directory, cards, batch):
     required(r'--master_port(?:=|[ \t]+)\d+', f'--master_port={29820 + cards}')
     required(r'(?<![\w/])train\.py(?=\s)', shlex.quote(str(Path(__file__).resolve())) + ' --worker')
     required(r'--vla\.max_steps[ \t]+\d+', '--vla.max_steps 100')
-    required(r'--vla\.global_batch_size[ \t]+[^\n]*', '--vla.global_batch_size 64 \\')
+    required(r'--vla\.global_batch_size[ \t]+[^\n]*', f'--vla.global_batch_size {global_batch} \\')
     # Discard W&B/old tracker and group settings in this generated copy only.
     text = re.sub(r'^[ \t]*--(?:wandb_project|wandb_entity|trackers|group_size)(?:[ \t]+|=)[^\n]*\n?', '', text, flags=re.MULTILINE)
     required(r'^[ \t]*--hf_token(?:[ \t]+|=)[^\n]*$', '  --trackers \'["jsonl"]\' \\\n  --group_size 16 \\\n  --hf_token "${hf_token}" \\')
     return text
 
 
-def summarize(path):
+def summarize(path, global_batch=64):
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     measured = {r['VLA Train/Step']: r for r in rows if 21 <= r['VLA Train/Step'] <= 100}
     if set(measured) != set(range(21, 101)):
@@ -55,7 +55,7 @@ def summarize(path):
             raise ValueError('Invalid step time or non-finite loss')
         times.append(seconds)
     return dict(measured_steps=len(times), mean_step_seconds=statistics.mean(times),
-                median_step_seconds=statistics.median(times), samples_per_second=64 / statistics.mean(times))
+                median_step_seconds=statistics.median(times), samples_per_second=global_batch / statistics.mean(times))
 
 
 def is_training_process(root, cwd, argv):
@@ -129,9 +129,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
     parser.add_argument('--stop-existing', action='store_true', help='SIGTERM train.py jobs whose cwd is exactly this repository')
-    parser.add_argument('--gpus', type=int, choices=(1, 2, 4), help='Run only this GPU count; default: compare 2 then 4 GPUs. Single GPU: batch 16, accumulation 4, global batch 64')
+    parser.add_argument('--gpus', type=int, choices=(1, 2, 4, 8), help='Run only this GPU count; default: compare 2 then 4 GPUs. Default 8-GPU batch: 16/GPU, global 128')
+    parser.add_argument('--batch-per-gpu', type=int, help='Positive multiple of group size 16; global batch becomes GPUs * batch, without gradient accumulation')
     args = parser.parse_args(argv)
-    configurations = (args.gpus,) if args.gpus else (2, 4)
+    if args.batch_per_gpu is not None and (args.batch_per_gpu <= 0 or args.batch_per_gpu % 16):
+        parser.error('--batch-per-gpu must be a positive multiple of group size 16')
+    configurations = []
+    for cards in ((args.gpus,) if args.gpus else (2, 4)):
+        batch = args.batch_per_gpu if args.batch_per_gpu is not None else BATCH_PER_GPU[cards]
+        global_batch = cards * batch if args.batch_per_gpu is not None else max(64, cards * batch)
+        configurations.append((cards, batch, global_batch))
     if sys.platform != 'linux':
         parser.error('Run this script on the Linux training server')
     root = args.root.resolve()
@@ -146,9 +153,9 @@ def main(argv=None):
             raise RuntimeError('Another throughput comparison is already running')
         directory = logs / datetime.now().strftime('perf_compare_%Y%m%d_%H%M%S_%f')
         directory.mkdir()
-        for cards in configurations:
+        for cards, batch, global_batch in configurations:
             launcher = directory / f'perf{cards}.sh'
-            launcher.write_text(make_launcher(original, directory, cards, BATCH_PER_GPU[cards]))
+            launcher.write_text(make_launcher(original, directory, cards, batch, global_batch))
             subprocess.run(['bash', '-n', str(launcher)], check=True)
         (logs / 'latest_perf_dir.txt').write_text(str(directory) + '\n')
         env = os.environ.copy()
@@ -161,10 +168,9 @@ def main(argv=None):
         elif training_processes(root):
             raise RuntimeError('Existing training found; use --stop-existing to discard that run')
         results = []
-        for cards in configurations:
-            batch = BATCH_PER_GPU[cards]
-            accumulation = 64 // (cards * batch)
-            print(f'Starting {cards} GPUs, batch/GPU={batch}, accumulation={accumulation}, global batch=64; log={directory / ("perf"+str(cards)+".log")}', flush=True)
+        for cards, batch, global_batch in configurations:
+            accumulation = global_batch // (cards * batch)
+            print(f'Starting {cards} GPUs, batch/GPU={batch}, accumulation={accumulation}, global batch={global_batch}; log={directory / ("perf"+str(cards)+".log")}', flush=True)
             with (directory / f'perf{cards}.log').open('w') as output:
                 child = subprocess.Popen(['bash', str(directory / f'perf{cards}.sh')], cwd=root,
                                          env=env, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -179,7 +185,8 @@ def main(argv=None):
                         child.wait()
                     raise
             if code:
-                results.append(dict(gpus=cards, batch_per_gpu=batch, status='failed', exit_code=code))
+                results.append(dict(gpus=cards, batch_per_gpu=batch, global_batch_size=global_batch,
+                                    status='failed', exit_code=code))
                 (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
                 print(f'{cards}-GPU run failed (exit {code}); see its log.', flush=True)
                 continue
@@ -189,10 +196,11 @@ def main(argv=None):
             run_dir = run_dirs[0]
             cfg = json.loads((run_dir / 'config.json').read_text())
             vla = cfg['vla']
-            if (vla['expected_world_size'], vla['per_device_batch_size'], vla['global_batch_size'], cfg['group_size']) != (cards, batch, 64, 16):
+            if (vla['expected_world_size'], vla['per_device_batch_size'], vla['global_batch_size'], cfg['group_size']) != (cards, batch, global_batch, 16):
                 raise ValueError('Actual training configuration does not match the comparison')
-            result = dict(gpus=cards, batch_per_gpu=batch, gradient_accumulation_steps=accumulation,
-                          status='passed', **summarize(run_dir / f'{run_dir.name}.jsonl'))
+            result = dict(gpus=cards, batch_per_gpu=batch, global_batch_size=global_batch,
+                          gradient_accumulation_steps=accumulation,
+                          status='passed', **summarize(run_dir / f'{run_dir.name}.jsonl', global_batch))
             results.append(result)
             (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
             print(json.dumps(result), flush=True)
@@ -201,8 +209,8 @@ def main(argv=None):
             if len(configurations) == 1:
                 print(f'BENCHMARK_COMPLETE: configuration={args.gpus} GPUs; results={directory / "summary.json"}', flush=True)
             else:
-                winner = min(passed, key=lambda r: r['mean_step_seconds'])
-                print(f'COMPARISON_COMPLETE: faster configuration={winner["gpus"]} GPUs; results={directory / "summary.json"}', flush=True)
+                winner = max(passed, key=lambda r: r['samples_per_second'])
+                print(f'COMPARISON_COMPLETE: highest throughput configuration={winner["gpus"]} GPUs; results={directory / "summary.json"}', flush=True)
         else:
             label = 'BENCHMARK_INCOMPLETE' if len(configurations) == 1 else 'COMPARISON_INCOMPLETE'
             print(f'{label}: successful configurations={len(passed)}; results={directory / "summary.json"}', flush=True)

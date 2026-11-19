@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -24,6 +25,9 @@ class BenchmarkTests(unittest.TestCase):
             (['--gpus', '4'], [4], 0, 'BENCHMARK_COMPLETE'),
             (['--gpus', '4'], [4], 1, 'BENCHMARK_INCOMPLETE'),
             (['--gpus', '1'], [1], 0, 'BENCHMARK_COMPLETE'),
+            (['--gpus', '8'], [8], 0, 'BENCHMARK_COMPLETE'),
+            (['--gpus', '8', '--batch-per-gpu', '32'], [8], 0, 'BENCHMARK_COMPLETE'),
+            (['--batch-per-gpu', '16'], [2, 4], 0, 'COMPARISON_COMPLETE'),
         ]:
             with self.subTest(extra=extra, code=code), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
@@ -37,11 +41,14 @@ class BenchmarkTests(unittest.TestCase):
                     cards = int(launcher.stem.removeprefix('perf'))
                     launched.append(cards)
                     if code == 0:
+                        script = launcher.read_text()
+                        batch = int(re.search(r'^bs=(\d+)$', script, re.MULTILINE)[1])
+                        global_batch = int(re.search(r'--vla.global_batch_size (\d+)', script)[1])
                         run_dir = launcher.parent / 'runs' / f'perf{cards}--image_aug'
                         run_dir.mkdir(parents=True)
                         (run_dir / 'config.json').write_text(json.dumps({
                             'group_size': 16, 'vla': {'expected_world_size': cards,
-                            'per_device_batch_size': 16 if cards == 1 else 64 // cards, 'global_batch_size': 64}}))
+                            'per_device_batch_size': batch, 'global_batch_size': global_batch}}))
                         rows = [{'VLA Train/Step': s, 'VLA Train/Step Time': 2,
                                  'VLA Train/Loss': 0.01} for s in range(1, 101)]
                         (run_dir / f'{run_dir.name}.jsonl').write_text(
@@ -75,6 +82,30 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertIn('CUDA_VISIBLE_DEVICES=0 ', script)
                     result = json.loads((directory / 'summary.json').read_text())[0]
                     self.assertEqual(result['gradient_accumulation_steps'], 4)
+                if expected == [8] and code == 0:
+                    batch = 32 if '--batch-per-gpu' in extra else 16
+                    script = (directory / 'perf8.sh').read_text()
+                    self.assertIn(f'bs={batch}', script)
+                    self.assertIn(f'--vla.global_batch_size {8 * batch}', script)
+                    self.assertIn('--nproc_per_node=8', script)
+                    result = json.loads((directory / 'summary.json').read_text())[0]
+                    self.assertEqual(result['global_batch_size'], 8 * batch)
+                    self.assertEqual(result['gradient_accumulation_steps'], 1)
+                    self.assertEqual(result['samples_per_second'], 8 * batch / 2)
+                if extra == ['--batch-per-gpu', '16']:
+                    self.assertIn('highest throughput configuration=4 GPUs', output.getvalue())
+
+    def test_batch_must_preserve_complete_memory_groups(self):
+        for batch in ('0', '-16', '8', '17', '24'):
+            with self.subTest(batch=batch), patch('sys.stderr', io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    self.mod.main(['--gpus', '8', '--batch-per-gpu', batch])
+                self.assertEqual(error.exception.code, 2)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'train.sh'
+            p.write_text((MODULE.parent / 'tests/fixtures/train.sh').read_text(encoding='utf-8'))
+            script = self.mod.make_launcher(p.read_text(), Path('/tmp/bench'), 8, 32, global_batch=256)
+            self.assertIn('--vla.global_batch_size 256', script)
 
     def test_single_gpu_worker_uses_no_shard_without_changing_multi_gpu(self):
         for world_size in ('1', '2'):
@@ -155,6 +186,7 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual(result['measured_steps'], 80)
             self.assertEqual(result['mean_step_seconds'], 2)
             self.assertEqual(result['samples_per_second'], 32)
+            self.assertEqual(self.mod.summarize(p, global_batch=256)['samples_per_second'], 128)
             rows[-1]['VLA Train/Loss'] = float('nan')
             p.write_text(''.join(json.dumps(r)+'\n' for r in rows))
             with self.assertRaises(ValueError):
