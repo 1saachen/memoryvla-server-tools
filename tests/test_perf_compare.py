@@ -28,6 +28,7 @@ class BenchmarkTests(unittest.TestCase):
             (['--gpus', '8'], [8], 0, 'BENCHMARK_COMPLETE'),
             (['--gpus', '8', '--batch-per-gpu', '32'], [8], 0, 'BENCHMARK_COMPLETE'),
             (['--batch-per-gpu', '16'], [2, 4], 0, 'COMPARISON_COMPLETE'),
+            (['--gpus', '2', '--devices', '3,4'], [2], 0, 'BENCHMARK_COMPLETE'),
         ]:
             with self.subTest(extra=extra, code=code), tempfile.TemporaryDirectory() as d:
                 root = Path(d)
@@ -61,6 +62,7 @@ class BenchmarkTests(unittest.TestCase):
                      patch.object(self.mod.sys, 'platform', 'linux'), \
                      patch.object(self.mod, 'training_processes', return_value={}), \
                      patch.object(self.mod.subprocess, 'run'), \
+                     patch.object(self.mod.subprocess, 'check_output', return_value='3, GPU-3333\n4, GPU-4444\n'), \
                      patch.object(self.mod.subprocess, 'Popen', side_effect=launch), \
                      patch('sys.stdout', output):
                     if code:
@@ -94,6 +96,23 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertEqual(result['samples_per_second'], 8 * batch / 2)
                 if extra == ['--batch-per-gpu', '16']:
                     self.assertIn('highest throughput configuration=4 GPUs', output.getvalue())
+                if '--devices' in extra:
+                    script = (directory / 'perf2.sh').read_text()
+                    self.assertIn('CUDA_VISIBLE_DEVICES=GPU-3333,GPU-4444 ', script)
+                    result = json.loads((directory / 'summary.json').read_text())[0]
+                    self.assertEqual(result['device_uuids'], ['GPU-3333', 'GPU-4444'])
+
+    def test_device_selection_rejects_duplicates_mismatch_and_missing_cards(self):
+        for argv in [ ['--devices', '3,4'], ['--gpus', '2', '--devices', '3,3'],
+                      ['--gpus', '2', '--devices', '3'], ['--gpus', '2', '--devices', '-1,4'],
+                      ['--gpus', '2', '--devices', 'x,4'] ]:
+            with self.subTest(argv=argv), patch('sys.stderr', io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    self.mod.main(argv)
+                self.assertEqual(error.exception.code, 2)
+        with patch.object(self.mod.subprocess, 'check_output', return_value='3, GPU-3333\n'):
+            with self.assertRaisesRegex(ValueError, 'not found'):
+                self.mod.resolve_devices([3, 4])
 
     def test_batch_must_preserve_complete_memory_groups(self):
         for batch in ('0', '-16', '8', '17', '24'):

@@ -17,7 +17,7 @@ from datetime import datetime
 BATCH_PER_GPU = {1: 16, 2: 32, 4: 16, 8: 16}
 
 
-def make_launcher(original, directory, cards, batch, global_batch=64):
+def make_launcher(original, directory, cards, batch, global_batch=64, devices=None):
     text = original
 
     def required(pattern, replacement):
@@ -31,7 +31,7 @@ def make_launcher(original, directory, cards, batch, global_batch=64):
     required(r'^[ \t]*shuffle_buffer_size=.*$', 'shuffle_buffer_size=1024')
     required(r'^[ \t]*run_root_dir=.*$', 'run_root_dir=' + shlex.quote(str(directory / 'runs')))
     required(r'^[ \t]*run_id=.*$', f'run_id=perf{cards}')
-    required(r'^[ \t]*CUDA_VISIBLE_DEVICES=[^ \t\n]+', 'CUDA_VISIBLE_DEVICES=' + ','.join(map(str, range(cards))))
+    required(r'^[ \t]*CUDA_VISIBLE_DEVICES=[^ \t\n]+', 'CUDA_VISIBLE_DEVICES=' + ','.join(devices if devices is not None else map(str, range(cards))))
     required(r'--nproc_per_node(?:=|[ \t]+)\d+', f'--nproc_per_node={cards}')
     required(r'--master_port(?:=|[ \t]+)\d+', f'--master_port={29820 + cards}')
     required(r'(?<![\w/])train\.py(?=\s)', shlex.quote(str(Path(__file__).resolve())) + ' --worker')
@@ -41,6 +41,18 @@ def make_launcher(original, directory, cards, batch, global_batch=64):
     text = re.sub(r'^[ \t]*--(?:wandb_project|wandb_entity|trackers|group_size)(?:[ \t]+|=)[^\n]*\n?', '', text, flags=re.MULTILINE)
     required(r'^[ \t]*--hf_token(?:[ \t]+|=)[^\n]*$', '  --trackers \'["jsonl"]\' \\\n  --group_size 16 \\\n  --hf_token "${hf_token}" \\')
     return text
+
+
+def resolve_devices(indices):
+    # Use UUIDs so CUDA ordering cannot redirect a requested physical GPU index.
+    output = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid', '--format=csv,noheader'],
+                                     text=True, timeout=15)
+    mapping = {int(index.strip()): uuid.strip() for index, uuid in
+               (line.split(',', 1) for line in output.splitlines() if line.strip())}
+    missing = set(indices) - mapping.keys()
+    if missing:
+        raise ValueError(f'Requested GPU indices not found: {sorted(missing)}')
+    return [mapping[index] for index in indices]
 
 
 def summarize(path, global_batch=64):
@@ -131,7 +143,16 @@ def main(argv=None):
     parser.add_argument('--stop-existing', action='store_true', help='SIGTERM train.py jobs whose cwd is exactly this repository')
     parser.add_argument('--gpus', type=int, choices=(1, 2, 4, 8), help='Run only this GPU count; default: compare 2 then 4 GPUs. Default 8-GPU batch: 16/GPU, global 128')
     parser.add_argument('--batch-per-gpu', type=int, help='Positive multiple of group size 16; global batch becomes GPUs * batch, without gradient accumulation')
+    parser.add_argument('--devices', help='Physical nvidia-smi GPU indices, e.g. 3,4; requires matching --gpus. Resolved to UUIDs before launch')
     args = parser.parse_args(argv)
+    indices = None
+    if args.devices is not None:
+        try:
+            indices = [int(value) for value in args.devices.split(',')]
+        except ValueError:
+            parser.error('--devices must contain comma-separated integer GPU indices')
+        if args.gpus is None or len(indices) != args.gpus or len(set(indices)) != len(indices) or min(indices) < 0:
+            parser.error('--devices requires --gpus with the same number of unique non-negative indices')
     if args.batch_per_gpu is not None and (args.batch_per_gpu <= 0 or args.batch_per_gpu % 16):
         parser.error('--batch-per-gpu must be a positive multiple of group size 16')
     configurations = []
@@ -141,6 +162,9 @@ def main(argv=None):
         configurations.append((cards, batch, global_batch))
     if sys.platform != 'linux':
         parser.error('Run this script on the Linux training server')
+    devices = resolve_devices(indices) if indices is not None else None
+    if devices is not None:
+        print(f'Selected physical GPUs {indices}; UUIDs={devices}', flush=True)
     root = args.root.resolve()
     original = (root / 'script/train/robomme/train.sh').read_text()
     logs = root / 'log/robomme'
@@ -155,7 +179,7 @@ def main(argv=None):
         directory.mkdir()
         for cards, batch, global_batch in configurations:
             launcher = directory / f'perf{cards}.sh'
-            launcher.write_text(make_launcher(original, directory, cards, batch, global_batch))
+            launcher.write_text(make_launcher(original, directory, cards, batch, global_batch, devices))
             subprocess.run(['bash', '-n', str(launcher)], check=True)
         (logs / 'latest_perf_dir.txt').write_text(str(directory) + '\n')
         env = os.environ.copy()
@@ -186,7 +210,7 @@ def main(argv=None):
                     raise
             if code:
                 results.append(dict(gpus=cards, batch_per_gpu=batch, global_batch_size=global_batch,
-                                    status='failed', exit_code=code))
+                                    device_uuids=devices, status='failed', exit_code=code))
                 (directory / 'summary.json').write_text(json.dumps(results, indent=2) + '\n')
                 print(f'{cards}-GPU run failed (exit {code}); see its log.', flush=True)
                 continue
@@ -199,6 +223,7 @@ def main(argv=None):
             if (vla['expected_world_size'], vla['per_device_batch_size'], vla['global_batch_size'], cfg['group_size']) != (cards, batch, global_batch, 16):
                 raise ValueError('Actual training configuration does not match the comparison')
             result = dict(gpus=cards, batch_per_gpu=batch, global_batch_size=global_batch,
+                          device_uuids=devices,
                           gradient_accumulation_steps=accumulation,
                           status='passed', **summarize(run_dir / f'{run_dir.name}.jsonl', global_batch))
             results.append(result)

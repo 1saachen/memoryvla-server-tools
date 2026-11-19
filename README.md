@@ -7,6 +7,7 @@
 - 默认依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。加 `--gpus 1/2/4/8` 可选择其中一种卡数。
 - 默认单卡、两卡、四卡总 batch 为 64，八卡每卡 batch 16、总 batch 128。`group_size=16`，shuffle buffer 为 1024。默认单卡梯度累积 4 次，其余配置无需梯度累积。
 - 用 `--batch-per-gpu 16`、`--batch-per-gpu 32` 等调整每卡 batch；必须为 16 的正整数倍，保证完整的记忆组。指定后总 batch 自动等于卡数乘以每卡 batch，无需梯度累积，不再固定为 64。
+- `--gpus 2 --devices 3,4` 只使用 `nvidia-smi` 编号 3、4 的物理卡。工具在启动前把编号解析为 UUID，避免 CUDA 枚举顺序影响选卡；卡号必须互不重复且数量与 `--gpus` 一致。省略 `--devices` 时仍使用从 0 开始的连续 CUDA 编号。工具不预留卡或自动判断是否独占，启动前需要自行确认占用。
 - 单卡测速子进程使用 FSDP `NO_SHARD`，完整模型、梯度和优化器驻留一张卡；实际显存是否足够需要服务器验证，显存不足会记录为失败。
 - 从训练仓库的 `script/train/robomme/train.sh` 生成临时启动脚本，保留学习率、数据和初始权重等配置。
 - 各运行 100 步，排除前 20 步，统计后 80 步的平均/中位耗时、吞吐量，并检查 loss 为有限数值。
@@ -32,6 +33,8 @@ git -C /data/embodied-ai/yaolin/memoryvla-server-tools pull --ff-only
 `--stop-existing` 会向工作目录恰好为目标训练仓库的 Python/torchrun `train.py` 进程发送 SIGTERM，放弃其未保存进度。省略此参数时，发现已有训练就退出。不要对共享给其他任务的训练仓库使用该参数。旧进程 45 秒内未退出则停止测试，不自动强制杀进程。
 
 下面这条测八卡 × 每卡 batch 16，总 batch 128，适用于已停止上一轮测速的情况。复制整行执行一次：
+
+先确认八卡均可使用。如果只有物理 GPU 3、4 空闲，把下面命令的 `--gpus 8 --batch-per-gpu 16` 替换为 `--gpus 2 --devices 3,4 --batch-per-gpu 32`，总 batch 为 64。详细日志为 `perf2.log`。GPU 3、4 在本次服务器拓扑中跨 NUMA，该结果不能代表同一 NUMA 内卡对的带宽。
 
 ```bash
 mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { perf_log="/data/embodied-ai/yaolin/MemoryVLA/log/robomme/perf_driver_$(date +%Y%m%d_%H%M%S).log"; nohup /data/embodied-ai/yaolin/envs/memvla/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/perf_compare.py --root /data/embodied-ai/yaolin/MemoryVLA --gpus 8 --batch-per-gpu 16 > "$perf_log" 2>&1 < /dev/null & perf_pid=$!; printf '%s\n' "$perf_pid" > "${perf_log%.log}.pid"; printf '%s\n' "$perf_log" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_log.txt; echo "测速 PID：$perf_pid；日志：$perf_log"; }
