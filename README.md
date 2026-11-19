@@ -71,11 +71,46 @@ cat "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_dir.txt)/s
 
 这些都是 100 步的性能测试，学习率等训练配置沿用原脚本。正式训练需要根据总 batch 重新评估学习率、训练步数和验证表现；batch 翻倍后照跑同样步数，处理的样本数也会翻倍。相同样本量不保证相同收敛或任务成功率。显存不足、网络失败、数据未就绪等情况需要根据详细日志处理。
 
+## 正式训练：四卡，总 batch 128，2000 步
+
+`train_run.py` 是当前商定配置的正式训练启动器：物理 GPU 3、4、5、6，每卡 batch 32，总 batch 128，2000 个参数更新步，每 500 步保存。学习率、数据、初始权重、增强等沿用训练仓库脚本；group size 16、shuffle buffer 1024 与上一轮测速一致。该次从初始权重重新训练，resume 关闭。
+
+它生成新的独立目录和启动脚本，直接运行训练仓库的 `train.py`，不经过禁用保存的测速 worker。训练仓库源码和原启动脚本不改动。每次输出位于 `log/robomme/formal_<时间>/runs/memvla_robomme_4gpu_bs32[--image_aug]/checkpoints/`。
+
+`--stop-benchmark` 仅向本工具目录下、目标训练仓库对应的测速进程发送 SIGTERM，并等待最多 45 秒。不会停止视频实验或已有正式训练；发现其他 `train.py` 训练时退出。测速未退出或锁仍被占用时不启动正式训练。运行期间持有锁，避免同工具的测速与训练重叠。
+
+更新并后台启动（复制整行执行一次）：
+
+```bash
+git -C /data/embodied-ai/yaolin/memoryvla-server-tools pull --ff-only && mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { train_log="/data/embodied-ai/yaolin/MemoryVLA/log/robomme/train_$(date +%Y%m%d_%H%M%S).log"; nohup /data/embodied-ai/yaolin/envs/memvla/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/train_run.py --root /data/embodied-ai/yaolin/MemoryVLA --stop-benchmark > "$train_log" 2>&1 < /dev/null & train_pid=$!; printf '%s\n' "$train_pid" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_pid.txt; printf '%s\n' "$train_log" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_log.txt; echo "正式训练 PID：$train_pid；日志：$train_log"; }
+```
+
+跟踪日志：
+
+```bash
+tail -n 50 -f "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_log.txt)"
+```
+
+看到 `FORMAL_TRAINING_START` 表示测速已退出并开始正式训练启动流程，不代表初始化已经完成。约 10 秒/步时，纯训练耗时约 5 小时 33 分，另加初始化与 checkpoint 保存。500、1000、1500、2000 步保存到本次独立目录。启动器等训练退出后检查这四个非空权重文件，成功时写入 `completed.json` 并输出 `FORMAL_TRAINING_COMPLETE`；仅检查文件存在及大小，不替代加载验证或任务评测。权重文件保存沿用训练仓库实现，并不额外添加优化器保存或精确断点续训能力。
+
+查看本次已生成的 checkpoint：
+
+```bash
+find "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_dir.txt)/runs" -type f -name '*.pt' -printf '%p %s bytes\n'
+```
+
+需要中止正式训练时，对启动器 PID 发送 SIGTERM；启动器会清理自己启动的训练进程组：
+
+```bash
+kill -TERM "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_pid.txt)"
+```
+
 ## 本地检查
 
 ```bash
 python -m unittest discover -s tests -p 'test_*.py'
 python perf_compare.py --help
+python train_run.py --help
 ```
 
 测试涵盖启动参数生成、已有服务器配置、异常输入、测速进程禁用保存、热身排除、缺失/非有限指标以及停止进程的范围判断。实际吞吐量和多卡运行必须在训练服务器验证。
