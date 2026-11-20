@@ -134,6 +134,20 @@ source /data/embodied-ai/yaolin/nvidia_vulkan/570.148.08/env.sh
 
 再运行原来的 `nohup ... scripts/run_example.py ...` 或模型评估客户端，子进程继承环境变量。此环境文件只需用于仿真，不要求模型服务端或训练进程使用；不写入 shell 全局配置。
 
+## RoboMME 评估：诊断被图像 KeyError 遮住的仿真错误
+
+如果客户端反复报 `'front_rgb_list'`，先停止本次客户端，保留模型服务。官方仿真 IK 失败时可返回空观测 `{}` 和包含原始错误的 `info`；评估器只检查 `None`，随后读取图像就会抛 KeyError，遮住原始原因。
+
+`eval_debug.py` 在独立进程中包装官方 `EnvRunner.get_init_obs/step`，遇到异常时打印完整 traceback、原始 simulator info、目标动作和动作前的末端状态，然后立即退出，绕过原评估器的重试与失败计分。正常动作仍调用原实现；不修改训练仓库、模型服务、动作或 IK 阈值。输出必须使用全新目录，不读取或覆盖已有评估分数。本工具用于定位错误，不作为正式评估结果。
+
+先在当前终端 source Vulkan 的 `env.sh`，确保实际模型服务已在 8051 端口就绪，再后台运行：
+
+```bash
+nohup env CUDA_VISIBLE_DEVICES=GPU-57d88094-a096-fc77-104a-2e6aa079e1b8 /data/embodied-ai/yaolin/envs/robomme/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/eval_debug.py --root /data/embodied-ai/yaolin/MemoryVLA --save-dir /data/embodied-ai/yaolin/MemoryVLA/log/robomme/全新诊断目录 > /data/embodied-ai/yaolin/setup_logs/eval_debug.log 2>&1 < /dev/null &
+```
+
+看到 `ROBOMME_DIAGNOSTIC_STOP` 后查看它上方的 `Simulator info` 和 traceback。打印出来的 IK 错误仍需结合动作、坐标与模型输出继续定位；这个诊断入口本身不解决不可达动作。
+
 ## 本地检查
 
 ```bash
