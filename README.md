@@ -114,6 +114,26 @@ find "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_dir.txt)
 kill -TERM "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_pid.txt)"
 ```
 
+## RoboMME 评估：本地补齐 NVIDIA Vulkan 图形库
+
+如果已安装 `libvulkan1`/`vulkan-tools`，但 `vulkaninfo` 报 `ERROR_INCOMPATIBLE_DRIVER`、系统找不到 NVIDIA ICD 和 `libGLX_nvidia`，可运行 `setup_vulkan.py`。它目前仅支持已经核对过的 Ubuntu 22.04/24.04、x86_64、驱动 570.148.08；其他组合报错退出，不猜测驱动版本。
+
+脚本从 NVIDIA 官方 CUDA 软件包仓库下载匹配的 `libnvidia-gl-570`（约 155 MiB），验证官方索引中的 SHA256，仅用 `dpkg-deb -x` 解压到 `/data/embodied-ai/yaolin/nvidia_vulkan/570.148.08/`。不会运行驱动安装器、安装 deb 软件包、更换内核驱动或写系统目录。不需要 sudo。解压后约需 0.5 GiB，另加下载包空间。
+
+```bash
+/data/embodied-ai/yaolin/envs/robomme/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/setup_vulkan.py
+```
+
+脚本生成 `env.sh`，指定本地驱动库和 ICD，尝试加载库并执行 `vulkaninfo --summary`；只有检测到 H200 才输出 `VULKAN_H200_OK`。这不代替 SAPIEN 实际渲染验证。如果缺系统依赖、设备权限或容器图形设备挂载仍不完整，保留异常继续诊断。
+
+每次启动仿真客户端前，在该终端执行：
+
+```bash
+source /data/embodied-ai/yaolin/nvidia_vulkan/570.148.08/env.sh
+```
+
+再运行原来的 `nohup ... scripts/run_example.py ...` 或模型评估客户端，子进程继承环境变量。此环境文件只需用于仿真，不要求模型服务端或训练进程使用；不写入 shell 全局配置。
+
 ## 本地检查
 
 ```bash
