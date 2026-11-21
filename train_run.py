@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the agreed 4-GPU, batch-128, 2000-step RoboMME training run."""
+"""Start a 4-GPU, batch-128 RoboMME training run."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime
@@ -19,15 +19,15 @@ from perf_compare import make_launcher, resolve_devices, start_id, training_proc
 BENCHMARK = Path(__file__).resolve().with_name('perf_compare.py')
 
 
-def make_training_launcher(original, directory, devices):
+def make_training_launcher(original, directory, devices, max_steps=2000, save_interval=500):
     text = make_launcher(original, directory, 4, 32, 128, devices)
     replacements = [
         (r'^[ \t]*run_id=.*$', 'run_id=memvla_robomme_4gpu_bs32'),
-        (r'^[ \t]*save_interval=.*$', 'save_interval=500'),
+        (r'^[ \t]*save_interval=.*$', f'save_interval={save_interval}'),
         (r'^[ \t]*is_resume=.*$', 'is_resume=False'),
         (r'^[ \t]*resume_step=.*$', 'resume_step=0'),
         (r'^[ \t]*resume_epoch=.*$', 'resume_epoch=0'),
-        (r'--vla\.max_steps 100\b', '--vla.max_steps 2000'),
+        (r'--vla\.max_steps 100\b', f'--vla.max_steps {max_steps}'),
         (r'--master_port=29824[^\n]*', '--master_port=29834 --log-dir ' +
          shlex.quote(str(directory / 'rank_logs')) + ' --tee 3 train.py \\'),
     ]
@@ -80,9 +80,9 @@ def stop_benchmarks(root):
         time.sleep(0.5)
 
 
-def check_checkpoints(directory):
+def check_checkpoints(directory, max_steps=2000, save_interval=500):
     checkpoints = []
-    for step in (500, 1000, 1500, 2000):
+    for step in [*range(save_interval, max_steps, save_interval), max_steps]:
         files = [p for p in (directory / 'runs').glob(f'*/checkpoints/step-{step:06d}-*.pt')
                  if p.is_file() and p.stat().st_size > 0]
         if len(files) != 1:
@@ -124,8 +124,12 @@ def monitor_gpu(directory, root):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path.cwd())
+    parser.add_argument('--max-steps', type=int, default=2000)
+    parser.add_argument('--save-interval', type=int, default=500)
     parser.add_argument('--stop-benchmark', action='store_true', help='Stop only this tool repository\'s benchmark processes for the chosen training root')
     args = parser.parse_args(argv)
+    if args.max_steps < 1 or args.save_interval < 1:
+        parser.error('--max-steps and --save-interval must both be positive')
     if sys.platform != 'linux':
         parser.error('Run this script on the Linux training server')
     root = args.root.resolve()
@@ -142,7 +146,7 @@ def main(argv=None):
         directory = logs / datetime.now().strftime('formal_%Y%m%d_%H%M%S_%f')
         directory.mkdir(mode=0o700)
         launcher = directory / 'train.sh'
-        launcher.write_text(make_training_launcher(original, directory, devices))
+        launcher.write_text(make_training_launcher(original, directory, devices, args.max_steps, args.save_interval))
         launcher.chmod(0o600)
         subprocess.run(['bash', '-n', str(launcher)], check=True)
         if args.stop_benchmark:
@@ -159,7 +163,7 @@ def main(argv=None):
         env.setdefault('HF_HOME', str(root.parent / 'hf_cache'))
         env.setdefault('HF_ENDPOINT', 'https://huggingface.co')
         env['PYTHONUNBUFFERED'] = '1'
-        print(f'FORMAL_TRAINING_START: physical GPUs=[3, 4, 5, 6]; UUIDs={devices}; batch/GPU=32; global batch=128; steps=2000; save every=500; directory={directory}', flush=True)
+        print(f'FORMAL_TRAINING_START: physical GPUs=[3, 4, 5, 6]; UUIDs={devices}; batch/GPU=32; global batch=128; steps={args.max_steps}; save every={args.save_interval}; directory={directory}', flush=True)
 
         def interrupted(signum, frame):
             raise SystemExit(128 + signum)
@@ -183,9 +187,9 @@ def main(argv=None):
         print(f'TRAIN_EXIT_CODE={code}', flush=True)
         if code:
             raise SystemExit(code if code > 0 else 128 - code)
-        checkpoints = check_checkpoints(directory)
+        checkpoints = check_checkpoints(directory, args.max_steps, args.save_interval)
         (directory / 'completed.json').write_text(json.dumps({'checkpoint_files': checkpoints}, indent=2) + '\n')
-        print(f'FORMAL_TRAINING_COMPLETE: four non-empty checkpoint files found; directory={directory}', flush=True)
+        print(f'FORMAL_TRAINING_COMPLETE: {len(checkpoints)} non-empty checkpoint files found; directory={directory}', flush=True)
 
 
 if __name__ == '__main__':

@@ -85,6 +85,8 @@ cat "$(cat /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_perf_dir.txt)/s
 git -C /data/embodied-ai/yaolin/memoryvla-server-tools pull --ff-only && mkdir -p /data/embodied-ai/yaolin/MemoryVLA/log/robomme && { train_log="/data/embodied-ai/yaolin/MemoryVLA/log/robomme/train_$(date +%Y%m%d_%H%M%S).log"; nohup /data/embodied-ai/yaolin/envs/memvla/bin/python -u /data/embodied-ai/yaolin/memoryvla-server-tools/train_run.py --root /data/embodied-ai/yaolin/MemoryVLA --stop-benchmark > "$train_log" 2>&1 < /dev/null & train_pid=$!; printf '%s\n' "$train_pid" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_pid.txt; printf '%s\n' "$train_log" > /data/embodied-ai/yaolin/MemoryVLA/log/robomme/latest_train_log.txt; echo "正式训练 PID：$train_pid；日志：$train_log"; }
 ```
 
+做 5000 步对照时，在上述启动命令中加入 `--max-steps 5000 --save-interval 1000`。新实验从脚本指定的初始权重开始，另建 `formal_*` 目录。参数默认值为 `--max-steps 2000 --save-interval 500`，完成检查覆盖每个保存间隔及最终步数。
+
 跟踪日志：
 
 ```bash

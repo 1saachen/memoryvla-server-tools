@@ -40,15 +40,15 @@ class FormalTrainingTests(unittest.TestCase):
             source = (MODULE.parent / 'tests/fixtures/train.sh').read_text(encoding='utf-8')
             script = root / 'train.sh'
             script.write_text(self.mod.make_training_launcher(source, Path('/tmp/formal'),
-                              ['GPU-3', 'GPU-4', 'GPU-5', 'GPU-6']), newline='\n')
+                              ['GPU-3', 'GPU-4', 'GPU-5', 'GPU-6'], 5000, 1000), newline='\n')
             # Replace torchrun only in this test with a Bash function to capture expanded arguments.
             result = subprocess.run([bash, '-c', 'torchrun() { printf "%s\\n" "$CUDA_VISIBLE_DEVICES" "$@"; }; source "$1"',
                                      'test', str(script)], check=True, capture_output=True, text=True)
             args = result.stdout.splitlines()
             self.assertEqual(args[0], 'GPU-3,GPU-4,GPU-5,GPU-6')
             self.assertIn('train.py', args)
-            self.assertEqual(args[args.index('--save_interval') + 1], '500')
-            self.assertEqual(args[args.index('--vla.max_steps') + 1], '2000')
+            self.assertEqual(args[args.index('--save_interval') + 1], '1000')
+            self.assertEqual(args[args.index('--vla.max_steps') + 1], '5000')
             self.assertEqual(args[args.index('--vla.global_batch_size') + 1], '128')
             self.assertEqual(args[args.index('--tee') + 1], '3')
 
