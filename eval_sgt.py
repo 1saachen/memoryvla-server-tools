@@ -41,9 +41,9 @@ def request_actions(session, url, rgb, first_frame):
     )
     response.raise_for_status()
     rows = [row.split() for row in response.json()["response"].split(";")]
-    if len(rows) != CHUNK_SIZE or any(len(row) != 7 for row in rows):
+    if len(rows) < CHUNK_SIZE or any(len(row) != 7 for row in rows):
         raise ValueError(
-            f"Expected {CHUNK_SIZE} rows of 7 values from {url}, "
+            f"Expected at least {CHUNK_SIZE} rows of 7 values from {url}, "
             f"got {len(rows)} rows with widths {[len(row) for row in rows]}"
         )
     actions = np.asarray(rows, dtype=np.float32)
@@ -53,7 +53,8 @@ def request_actions(session, url, rgb, first_frame):
             f"Non-finite actions from {url}: {actions[invalid].tolist()} "
             f"at zero-based (step, axis) indices {np.argwhere(invalid).tolist()}"
         )
-    return actions
+    # Replan after four simulator steps even if the service returns more actions.
+    return actions[:CHUNK_SIZE]
 
 
 def rollout(env, policy, seed, video):
