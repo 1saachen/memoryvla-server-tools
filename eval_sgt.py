@@ -72,6 +72,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:8052/process_frame")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--render-backend", default="gpu", help="ManiSkill render device: gpu, cuda:N, or cpu")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.episodes < 1:
@@ -86,15 +87,18 @@ def main():
         "task": TASK, "instruction": PROMPT, "seed_start": args.seed,
         "num_eval": args.episodes, "max_steps": MAX_STEPS, "action_scale": 1.0,
         "action_chunking_window": CHUNK_SIZE, "control_mode": CONTROL_MODE,
-        "camera": "base_camera", "sim_backend": "cpu", "url": args.url,
+        "camera": "base_camera", "sim_backend": "cpu", "render_backend": args.render_backend,
+        "url": args.url,
         "versions": {name: version(name) for name in ("mikasa-robo-suite", "mani-skill", "sapien")},
     }
     with (args.out / "config.json").open("x", encoding="utf-8") as config_file:
         json.dump(manifest, config_file, indent=2)
+    print(f"Initializing {TASK} with CPU physics and render_backend={args.render_backend}", flush=True)
     env = gym.make(
         TASK, num_envs=1, obs_mode="rgb", control_mode=CONTROL_MODE,
-        sim_backend="cpu", render_backend="gpu", reward_mode="dense",
+        sim_backend="cpu", render_backend=args.render_backend, reward_mode="dense",
     )
+    print("SGT environment ready; starting rollouts", flush=True)
     try:
         with requests.Session() as session, (args.out / "episodes.jsonl").open("x", encoding="utf-8") as log:
             def policy(rgb, first_frame):
