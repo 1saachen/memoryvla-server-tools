@@ -40,12 +40,19 @@ def request_actions(session, url, rgb, first_frame):
         timeout=(10, 180),
     )
     response.raise_for_status()
-    actions = np.asarray(
-        [row.split() for row in response.json()["response"].split(";")],
-        dtype=np.float32,
-    )
-    if actions.shape != (CHUNK_SIZE, 7) or not np.isfinite(actions).all():
-        raise ValueError(f"Expected {CHUNK_SIZE} finite 7D actions, got {actions.shape}")
+    rows = [row.split() for row in response.json()["response"].split(";")]
+    if len(rows) != CHUNK_SIZE or any(len(row) != 7 for row in rows):
+        raise ValueError(
+            f"Expected {CHUNK_SIZE} rows of 7 values from {url}, "
+            f"got {len(rows)} rows with widths {[len(row) for row in rows]}"
+        )
+    actions = np.asarray(rows, dtype=np.float32)
+    invalid = ~np.isfinite(actions)
+    if invalid.any():
+        raise ValueError(
+            f"Non-finite actions from {url}: {actions[invalid].tolist()} "
+            f"at zero-based (step, axis) indices {np.argwhere(invalid).tolist()}"
+        )
     return actions
 
 
