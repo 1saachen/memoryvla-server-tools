@@ -153,24 +153,16 @@ GPUS=4 SAVE_INTERVAL=2 bash "$PLAN/train.sh" "$MEMVLA_REPO" "$WORK/rlds/smoke" \
 
 ## 5. 生成正式数据并微调
 
-短跑验收后采集正式数据。六种顺序各 50 条训练、10 条验证、10 条测试，总数 **300 / 60 / 60**。中断后按原参数运行 `--resume`。更改布局种子、采样步长或图像尺寸时使用新的数据目录。
+正式采集脚本默认对六种顺序各采 200 条训练、20 条验证和 20 条测试，总数 **1,200 / 120 / 120**。原始轨迹保存到 `$WORK/data/full`，日志写到 `$WORK/logs/collect-full.log`。脚本复用首条示范的任务和验收条件，中断后用同一条命令继续。
 
 ```bash
 conda activate buttons-sim
-# 恢复第 2 节中 CoppeliaSim 和软件渲染变量。
-for split in train val test; do
-  n=10
-  if [[ "$split" == train ]]; then n=50; fi
-  xvfb-run -a -s '-screen 0 1024x768x24' \
-    python "$PLAN/collect.py" --output "$WORK/data/full" \
-    --split "$split" --per-order "$n" --resume || break
-done
-for split in train val test; do
-  echo "$split $(find "$WORK/data/full/$split" -maxdepth 1 -name 'order*_episode*.npz' | wc -l)"
-done
+bash "$PLAN/collect_batch.sh" "$WORK"
 ```
 
-确认三组计数后，切回第 4 节跑短跑的训练终端，或恢复同一环境、路径和 GPU 分配。先导出 RLDS，验收输出为 300 条训练轨迹。
+参数可依次指定每种顺序的训练、验证、测试条数，例如 `bash "$PLAN/collect_batch.sh" "$WORK" 50 10 10`。要另建一套数据时，通过 `BUTTONS_OUTPUT_DIR` 指定新的目录，导出时也要相应设置 `--source` 和新的 `--data-root`。若单条轨迹耗尽默认的 12 次规划与回放尝试，可在原命令前加 `BUTTONS_ATTEMPTS=30` 继续。
+
+确认三组计数后，切回训练环境导出 RLDS。默认应报告 1,200 条训练轨迹，验证和测试轨迹保留为 NPZ。
 
 ```bash
 CUDA_VISIBLE_DEVICES="" python "$PLAN/export_rlds.py" \
