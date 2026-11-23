@@ -10,7 +10,7 @@
 export LAB="$HOME"
 export WORK="$LAB/rlbench-memoryvla"
 mkdir -p "$WORK/logs"
-git clone --branch bench-buttons-workflow --single-branch \
+git clone --branch main --single-branch \
   https://github.com/1saachen/memoryvla-server-tools.git "$WORK/server-tools"
 export PLAN="$WORK/server-tools/rlbench_buttons"
 git -C "$WORK/server-tools" rev-parse HEAD

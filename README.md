@@ -1,6 +1,11 @@
-# MemoryVLA server tools
+# Robotics Experiment Tools
 
-用于现有 RoboMME / MemoryVLA Linux 训练环境的独立测速工具。工具只使用 Python 标准库；训练依赖由现有 `memvla` 环境提供。
+用于在 Linux 服务器上采集 RLBench 仿真示范、训练 MemoryVLA，以及复跑 RoboMME 评估。已有的 MemoryVLA 和 RoboMME 命令使用各自的服务器环境。
+
+## 实验入口
+
+- [RLBench 三色按钮](rlbench_buttons/README.md)覆盖示范采集、RLDS 数据导出和 MemoryVLA 微调。
+- [RoboMME 与 MemoryVLA](#对照方式)覆盖已有训练环境的测速、正式训练和评估。
 
 ## 对照方式
 
