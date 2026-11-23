@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-model_gpu=${1:?Usage: bash run_sgt.sh MODEL_GPU [RENDER_GPU] [EPISODES]}
+usage='Usage: bash run_sgt.sh MODEL_GPU [RENDER_GPU] [EPISODES] [--paired-memory-ablation]'
+model_gpu=${1:?$usage}
 render_gpu=${2:-5}
 episodes=${3:-100}
+eval_flags=()
+if [[ ${4:-} == --paired-memory-ablation && $# == 4 ]]; then
+    eval_flags+=(--paired-memory-ablation)
+elif (( $# > 3 )); then
+    echo "$usage" >&2
+    exit 2
+fi
 base=/data/embodied-ai/yaolin
 root="$base/sgt-repro"
 repo="$base/MemoryVLA"
 model_python="$base/envs/memvla/bin/python"
 eval_python="$root/venv-sgt/bin/python"
 checkpoint="$root/models/memvla-mikasa/checkpoints/memvla-mikasa.pt"
-client="$(dirname "$(realpath "$0")")/eval_sgt.py"
+tools_dir="$(dirname "$(realpath "$0")")"
 
 [[ -s "$checkpoint" && -r "$repo/deploy.py" && -x "$model_python" && -x "$eval_python" ]]
 [[ -s "$root/maniskill-data/assets/mani_skill2_ycb/info_pick_v0.json" ]]
@@ -25,21 +33,8 @@ render_uuid=$(nvidia-smi -i "$render_gpu" --query-gpu=uuid --format=csv,noheader
 run=$(mktemp -d "$root/sgt_gpu_XXXXXX")
 cd "$run"
 
-CUDA_VISIBLE_DEVICES="$model_uuid" TMPDIR="$run" "$model_python" -u -c '
-import pathlib
-import runpy
-import sys
-
-entry = pathlib.Path(sys.argv.pop(1))
-sys.path.insert(0, str(entry.parent))
-app = runpy.run_path(str(entry))["app"]
-
-@app.get("/sgt-ready")
-def ready():
-    return "SGT_READY"
-
-app.run(host="127.0.0.1", port=8052, threaded=False)
-' "$repo/deploy.py" --saved_model_path "$checkpoint" --unnorm_key mikasa_dataset \
+CUDA_VISIBLE_DEVICES="$model_uuid" TMPDIR="$run" "$model_python" -u "$tools_dir/sgt_server.py" \
+    "$repo/deploy.py" --saved_model_path "$checkpoint" --unnorm_key mikasa_dataset \
     --action_chunking --action_chunking_window 4 --cfg_scale 1.5 --seed 7 --port 8052 \
     > "$run/server.log" 2>&1 &
 server_pid=$!
@@ -66,8 +61,8 @@ source "$base/nvidia_vulkan/570.148.08/env.sh"
 export MS_ASSET_DIR="$root/maniskill-data"
 export CUDA_VISIBLE_DEVICES="$render_uuid"
 printf 'SERVER_READY\nEVAL_LOG=%s/eval.log\n' "$run"
-if ! "$eval_python" -u "$client" --render-backend cuda:0 --episodes "$episodes" \
-    --seed 7 --out "$run" > "$run/eval.log" 2>&1; then
+if ! "$eval_python" -u "$tools_dir/eval_sgt.py" --render-backend cuda:0 --episodes "$episodes" \
+    --seed 7 --out "$run" "${eval_flags[@]}" > "$run/eval.log" 2>&1; then
     tail -n 30 "$run/eval.log" >&2
     tail -n 60 "$run/server.log" >&2
     exit 1
