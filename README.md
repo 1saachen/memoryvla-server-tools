@@ -2,6 +2,8 @@
 
 用于现有 RoboMME / MemoryVLA Linux 训练环境的独立测速工具。工具只使用 Python 标准库；训练依赖由现有 `memvla` 环境提供。
 
+实验配置、评估结果和排查进展见 [工作日志](WORK_LOG.md)，维护要求见 [AGENTS.md](AGENTS.md)。
+
 ## 对照方式
 
 - 默认依次运行 GPU 0、1，每卡 batch 32；GPU 0～3，每卡 batch 16。加 `--gpus 1/2/4/8` 可选择其中一种卡数。
