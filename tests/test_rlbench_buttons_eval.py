@@ -1,9 +1,16 @@
 import unittest
 
 from rlbench_buttons.eval_buttons import score_presses, summarize
+from rlbench_buttons.instructions import paper_instruction
 
 
 class ButtonMetricsTest(unittest.TestCase):
+    def test_paper_instruction_preserves_target_order(self):
+        self.assertEqual(
+            paper_instruction((1, 0, 2)),
+            "Push the green, blue, and pink buttons in sequence",
+        )
+
     def test_score_awards_points_for_each_correct_position(self):
         order = (0, 1, 2)
         self.assertEqual(score_presses(order, []), 0)

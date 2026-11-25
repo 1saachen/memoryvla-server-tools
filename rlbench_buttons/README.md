@@ -198,4 +198,13 @@ bash "$PLAN/run_eval.sh" "$WORK" "$checkpoint" 4 egl5 1
 
 默认每次推理后执行四个动作。对照试验可在启动器前设 `BUTTONS_CHUNK_STEPS=1`，它会在每个动作后重新取图并推理。`summary.json` 的 `chunk_steps` 记录实际设置。
 
+用同一权重对照论文设置时，可以分别设 `BUTTONS_INSTRUCTION_STYLE=paper`、`BUTTONS_MEM_LENGTH=256` 或 `BUTTONS_CHUNK_STEPS=10`。第一项按论文表 18 的模板生成指令，例如 `Push the green, blue, and pink buttons in sequence`。第二项只覆盖推理记忆容量。第三项对应作者公开真机部署脚本的动作返回窗口，论文未单独给出按钮实验的执行窗口。一次只改一项可以区分各设置的影响。`episodes.jsonl` 会记录实际传给模型的指令，`summary.json` 会记录实际容量、指令模板和动作执行步数。 [论文表 18](https://arxiv.org/html/2508.19236v2#A11.T18) · [作者部署脚本](https://github.com/shihao1895/MemoryVLA/blob/d732ea9072bc063399ccc817aed74ab172eb50be/script/eval/real_world/deploy.sh)
+
+如果要让训练和评测都采用论文模板，可从现有 NPZ 导出到新目录。评测时也设 `BUTTONS_INSTRUCTION_STYLE=paper`。
+
+```bash
+CUDA_VISIBLE_DEVICES="" python "$PLAN/export_rlds.py" --source "$WORK/data/full" \
+  --data-root "$WORK/rlds/paper" --instruction-style paper
+```
+
 严格成功要求三键按序触发、松开后回到等待位。论文分数按前三次触发的位置给分，每按对一个位置得 30 分，三次都对再加 10 分，平均分满分为 100。为保证能评分三个位置，评测在前两次出现错按时仍允许继续。仿真以按钮关节位移达到 3 mm 为触发，同一仿真时刻的多键触发不计有序得分。论文的真机试验允许轻触，采用三种顺序各 5 回合。 [MemoryVLA 附录 D](https://arxiv.org/html/2508.19236v2#A4)

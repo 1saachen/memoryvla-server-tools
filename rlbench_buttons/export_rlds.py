@@ -6,14 +6,16 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow_datasets as tfds
+from instructions import paper_instruction
 
 
 class CustomFinetuning(tfds.core.GeneratorBasedBuilder):
     VERSION = tfds.core.Version("1.0.0")
 
-    def __init__(self, *, source, image_size, **kwargs):
+    def __init__(self, *, source, image_size, instruction_style="saved", **kwargs):
         self.source = source
         self.image_size = image_size
+        self.instruction_style = instruction_style
         super().__init__(**kwargs)
 
     def _info(self):
@@ -65,6 +67,8 @@ class CustomFinetuning(tfds.core.GeneratorBasedBuilder):
                 raise ValueError(f"{path}: missing instruction or non-finite numeric fields")
             if image.shape[1:] != (self.image_size, self.image_size, 3) or image.dtype != np.uint8:
                 raise ValueError(f"{path}: unexpected RGB shape or dtype")
+            if self.instruction_style == "paper":
+                instruction = paper_instruction(order)
 
             terminal_action = np.zeros(7, dtype=np.float32)
             terminal_action[6] = action[-1, 6]
@@ -92,9 +96,11 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--instruction-style", choices=("saved", "paper"), default="saved")
     args = parser.parse_args()
     builder = CustomFinetuning(
-        source=args.source, data_dir=str(args.data_root), image_size=args.image_size
+        source=args.source, data_dir=str(args.data_root), image_size=args.image_size,
+        instruction_style=args.instruction_style,
     )
     if Path(builder.data_dir).exists():
         raise FileExistsError(f"{builder.data_dir} exists. Choose a fresh --data-root.")

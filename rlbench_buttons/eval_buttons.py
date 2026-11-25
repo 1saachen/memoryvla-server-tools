@@ -14,6 +14,7 @@ UNNORM_KEY = "custom_finetuning"
 COLORS = ("blue", "green", "pink")
 ORDERS = tuple(itertools.permutations(range(3)))
 CHUNK_STEPS = 4
+MAX_CHUNK_STEPS = 16
 MAX_ACTIONS = 800
 POLICY_SEED = 7
 CFG_SCALE = 1.5
@@ -43,7 +44,7 @@ def summarize(rows):
     }
 
 
-def policy_worker(checkpoint):
+def policy_worker(checkpoint, chunk_steps, mem_length):
     # Keep the JSON pipe separate from logs from Python and native libraries.
     with os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1) as responses:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
@@ -62,12 +63,15 @@ def policy_worker(checkpoint):
                 "mem_length", "retrieval_layers", "use_timestep_pe", "fusion_type",
                 "consolidate_type", "update_fused",
             )
+            model_config = {key: config[key] for key in keys if key in config}
+            if mem_length is not None:
+                model_config["mem_length"] = mem_length
             model = load_vla(
                 str(checkpoint), hf_token=None, load_for_training=False,
-                **{key: config[key] for key in keys if key in config},
+                **model_config,
             ).to(device="cuda", dtype=torch.float32).eval()
             model.get_action_stats(UNNORM_KEY)
-            print(json.dumps({"ready": True}), file=responses)
+            print(json.dumps({"ready": True, "mem_length": model.mem_length}), file=responses)
             for line in sys.stdin:
                 request = json.loads(line)
                 first = request["first_frame"]
@@ -81,9 +85,9 @@ def policy_worker(checkpoint):
                         episode_first_frame="True" if first else "False",
                     )
                 if (actions.ndim != 2 or actions.shape[1] != 7
-                        or len(actions) < CHUNK_STEPS or not np.isfinite(actions).all()):
+                        or len(actions) < chunk_steps or not np.isfinite(actions).all()):
                     raise ValueError(f"Expected a finite action chunk with shape (N, 7), got {actions.shape}")
-                print(json.dumps(actions[:CHUNK_STEPS].tolist()), file=responses)
+                print(json.dumps(actions[:chunk_steps].tolist()), file=responses)
 
 
 def read_policy(process):
@@ -102,6 +106,7 @@ def evaluate(args):
     from collect import PushButtons as CollectedPushButtons
     from collect import apply_delta, button_positions, make_environment
     from demo_reset import reset_demo
+    from instructions import paper_instruction
 
     class PushButtons(CollectedPushButtons):
         # Keep the class name for RLBench's asset lookup. During the policy
@@ -132,7 +137,8 @@ def evaluate(args):
         os.pathsep + policy_env["PYTHONPATH"] if policy_env.get("PYTHONPATH") else ""
     )
     model_command = [str(args.model_python), "-u", str(Path(__file__).resolve()),
-                     "--policy-worker", str(args.checkpoint)]
+                     "--policy-worker", str(args.checkpoint), str(args.chunk_steps),
+                     str(args.mem_length or 0)]
     rows = []
     with (args.output / "episodes.jsonl").open("x", encoding="utf-8") as episodes:
         with subprocess.Popen(
@@ -140,8 +146,13 @@ def evaluate(args):
             stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
         ) as policy:
             try:
-                if read_policy(policy) != {"ready": True}:
+                model_info = read_policy(policy)
+                if model_info.get("ready") is not True:
                     raise RuntimeError("Unexpected MemoryVLA startup response")
+                mem_length = model_info["mem_length"]
+                if args.mem_length is not None and mem_length != args.mem_length:
+                    raise RuntimeError(f"Expected memory capacity {args.mem_length}, got {mem_length}")
+                print(f"Memory capacity: {mem_length}; actions per inference: {args.chunk_steps}", flush=True)
                 env = make_environment(224)
                 env.launch()
                 try:
@@ -171,6 +182,9 @@ def evaluate(args):
                         if descriptions[0] != saved_instruction:
                             raise RuntimeError(f"{path.name}: saved instruction did not match after reset")
                         print(f"Verified {path.stem}: {descriptions[0]}", flush=True)
+                        instruction = (paper_instruction(expected_order)
+                                       if args.instruction_style == "paper" else saved_instruction)
+                        print(f"Policy instruction {path.stem}: {instruction}", flush=True)
                         task.scoring_rollout = True
 
                         reward, done, steps = 0, False, 0
@@ -182,7 +196,7 @@ def evaluate(args):
                                 Image.fromarray(rgb).save(image, format="PNG", compress_level=1)
                                 request = {
                                     "image": base64.b64encode(image.getvalue()).decode("ascii"),
-                                    "instruction": descriptions[0],
+                                    "instruction": instruction,
                                     "first_frame": steps == 0,
                                     "policy_seed": policy_seed,
                                 }
@@ -200,6 +214,7 @@ def evaluate(args):
                         row = {
                             "episode_id": path.stem, "order_id": order,
                             "target": [COLORS[i] for i in expected_order],
+                            "instruction": instruction,
                             "press_events": [[t, COLORS[i]] for t, i in task.events],
                             "layout_seed": seed, "policy_seed": policy_seed,
                             "steps": steps, "success": bool(reward),
@@ -223,6 +238,7 @@ def evaluate(args):
     summary = {
         "checkpoint": str(args.checkpoint), "split": "test",
         "unnorm_key": UNNORM_KEY, "chunk_steps": args.chunk_steps,
+        "mem_length": mem_length, "instruction_style": args.instruction_style,
         "max_actions": MAX_ACTIONS, "policy_seed_base": POLICY_SEED,
         "cfg_scale": CFG_SCALE, "ddim_steps": DDIM_STEPS, "precision": "fp32",
         "press_detection": "RLBench button joint displacement >= 0.003 m",
@@ -239,8 +255,8 @@ def evaluate(args):
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--policy-worker":
-        policy_worker(Path(sys.argv[2]))
+    if len(sys.argv) == 5 and sys.argv[1] == "--policy-worker":
+        policy_worker(Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]) or None)
         return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True, help="NPZ root containing test/")
@@ -250,9 +266,15 @@ def main():
     parser.add_argument("--model-repo", type=Path, required=True)
     parser.add_argument("--model-gpu", required=True, help="CUDA device UUID")
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
-    parser.add_argument("--chunk-steps", type=int, choices=range(1, CHUNK_STEPS + 1),
-                        default=CHUNK_STEPS, help="Actions executed before the next policy observation")
+    parser.add_argument("--chunk-steps", type=int, default=CHUNK_STEPS, metavar="1..16",
+                        help="Actions executed before the next policy observation")
+    parser.add_argument("--mem-length", type=int, help="Override checkpoint memory capacity for inference")
+    parser.add_argument("--instruction-style", choices=("saved", "paper"), default="saved")
     args = parser.parse_args()
+    if not 1 <= args.chunk_steps <= MAX_CHUNK_STEPS:
+        parser.error(f"--chunk-steps must be between 1 and {MAX_CHUNK_STEPS}")
+    if args.mem_length is not None and args.mem_length < 1:
+        parser.error("--mem-length must be positive")
     args.checkpoint = args.checkpoint.resolve()
     args.model_repo = args.model_repo.resolve()
     evaluate(args)
