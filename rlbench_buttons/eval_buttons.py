@@ -188,7 +188,7 @@ def evaluate(args):
                                 }
                             policy.stdin.write(json.dumps(request) + "\n")
                             actions = read_policy(policy)
-                            for action in actions[:MAX_ACTIONS - steps]:
+                            for action in actions[:min(args.chunk_steps, MAX_ACTIONS - steps)]:
                                 steps += 1
                                 try:
                                     obs, reward, done = apply_delta(env_task, action)
@@ -222,7 +222,7 @@ def evaluate(args):
                     policy.terminate()
     summary = {
         "checkpoint": str(args.checkpoint), "split": "test",
-        "unnorm_key": UNNORM_KEY, "chunk_steps": CHUNK_STEPS,
+        "unnorm_key": UNNORM_KEY, "chunk_steps": args.chunk_steps,
         "max_actions": MAX_ACTIONS, "policy_seed_base": POLICY_SEED,
         "cfg_scale": CFG_SCALE, "ddim_steps": DDIM_STEPS, "precision": "fp32",
         "press_detection": "RLBench button joint displacement >= 0.003 m",
@@ -250,6 +250,8 @@ def main():
     parser.add_argument("--model-repo", type=Path, required=True)
     parser.add_argument("--model-gpu", required=True, help="CUDA device UUID")
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
+    parser.add_argument("--chunk-steps", type=int, choices=range(1, CHUNK_STEPS + 1),
+                        default=CHUNK_STEPS, help="Actions executed before the next policy observation")
     args = parser.parse_args()
     args.checkpoint = args.checkpoint.resolve()
     args.model_repo = args.model_repo.resolve()

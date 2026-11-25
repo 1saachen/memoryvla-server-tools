@@ -11,6 +11,11 @@ checkpoint="$(realpath -- "$2")"
 model_gpu="$3"
 render_egl="$4"
 per_order="${5:-20}"
+chunk_steps="${BUTTONS_CHUNK_STEPS:-4}"
+if [[ ! "$chunk_steps" =~ ^[1-4]$ ]]; then
+    echo 'BUTTONS_CHUNK_STEPS must be between 1 and 4.' >&2
+    exit 2
+fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 model_repo="${MEMVLA_REPO:-$(dirname "$work")/MemoryVLA}"
 model_python="${MEMVLA_PYTHON:-$(dirname "$work")/envs/memvla/bin/python}"
@@ -51,6 +56,7 @@ nohup xvfb-run -a -s '-screen 0 1024x768x24' "$vgl" -d "$render_egl" \
     "$sim_python" -u "$script_dir/eval_buttons.py" --data "$work/data/full" \
     --checkpoint "$checkpoint" --output "$output" --model-repo "$model_repo" \
     --model-python "$model_python" --model-gpu "$model_uuid" --per-order "$per_order" \
+    --chunk-steps "$chunk_steps" \
     > "$output/eval.log" 2>&1 < /dev/null &
 eval_pid=$!
 printf '%s\n' "$eval_pid" > "$output/eval.pid"
