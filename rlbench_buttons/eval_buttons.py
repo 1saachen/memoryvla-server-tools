@@ -101,6 +101,7 @@ def evaluate(args):
     from rlbench.backend.exceptions import InvalidActionError
     from collect import PushButtons as CollectedPushButtons
     from collect import apply_delta, button_positions, make_environment
+    from demo_reset import reset_demo
 
     class PushButtons(CollectedPushButtons):
         # Keep the class name for RLBench's asset lookup. During the policy
@@ -147,19 +148,29 @@ def evaluate(args):
                     env_task = env.get_task(PushButtons)
                     task = env_task._task
                     for order, idx, path in cases:
+                        expected_order = ORDERS[order]
                         with np.load(path, allow_pickle=False) as demo_file:
                             seed = int(demo_file["seed"].item())
                             layout = demo_file["layout"]
+                            saved_order = tuple(int(button) for button in demo_file["order"])
+                            saved_instruction = str(demo_file["instruction"].item())
+                        if saved_order != expected_order:
+                            raise RuntimeError(
+                                f"{path.name}: saved order {saved_order} does not match {expected_order}"
+                            )
                         print(f"Starting {path.stem}, layout seed {seed}", flush=True)
                         # Reproduce the collector's reset, including any planner retry.
                         np.random.seed(seed)
                         env_task.set_variation(order)
                         task.scoring_rollout = False
                         demo = env_task.get_demos(1, live_demos=True, max_attempts=2)[0]
-                        descriptions, obs = env_task.reset_to_demo(demo)
+                        descriptions, obs = reset_demo(env_task, demo, order, expected_order)
                         del demo
                         if not np.allclose(button_positions(task), layout, atol=1e-4, rtol=0):
                             raise RuntimeError(f"{path.name}: saved test layout could not be restored")
+                        if descriptions[0] != saved_instruction:
+                            raise RuntimeError(f"{path.name}: saved instruction did not match after reset")
+                        print(f"Verified {path.stem}: {descriptions[0]}", flush=True)
                         task.scoring_rollout = True
 
                         reward, done, steps = 0, False, 0
@@ -188,11 +199,11 @@ def evaluate(args):
                                     break
                         row = {
                             "episode_id": path.stem, "order_id": order,
-                            "target": [COLORS[i] for i in ORDERS[order]],
+                            "target": [COLORS[i] for i in expected_order],
                             "press_events": [[t, COLORS[i]] for t, i in task.events],
                             "layout_seed": seed, "policy_seed": policy_seed,
                             "steps": steps, "success": bool(reward),
-                            "score": score_presses(ORDERS[order], task.events),
+                            "score": score_presses(expected_order, task.events),
                             "end_reason": (
                                 "success" if reward else "invalid_action" if error is not None
                                 else "wrong_or_simultaneous_press" if done else "action_limit"

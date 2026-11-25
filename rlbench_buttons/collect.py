@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 
 import numpy as np
 from PIL import Image
+from demo_reset import reset_demo
 from pyrep.objects.dummy import Dummy
 from pyrep.objects.object import Object
 from rlbench.action_modes.action_mode import MoveArmThenGripper
@@ -144,7 +145,7 @@ def collect_episode(env_task, variation, stride):
     task = env_task._task  # pinned RLBench does not expose the task object's event state
     expert = env_task.get_demos(1, live_demos=True, max_attempts=2)[0]
     layout = button_positions(task)
-    descriptions, obs = env_task.reset_to_demo(expert)
+    descriptions, obs = reset_demo(env_task, expert, variation, ORDERS[variation])
     if not np.allclose(button_positions(task), layout, atol=1e-4):
         raise RuntimeError("Expert replay did not restore the original button layout.")
 
