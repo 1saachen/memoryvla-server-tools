@@ -207,4 +207,6 @@ CUDA_VISIBLE_DEVICES="" python "$PLAN/export_rlds.py" --source "$WORK/data/full"
   --data-root "$WORK/rlds/paper" --instruction-style paper
 ```
 
+要用已有训练流程接近论文的长时序设置，可用 `DATALOADER_TYPE=stream MEM_LENGTH=256 GROUP_SIZE=16` 启动 `train.sh`，输入新导出的 `rlds/paper` 和独立的运行名。此处 `GROUP_SIZE=16` 保留每卡 batch 16，stream 按回合顺序读取，模型跨 batch 保留同一回合的记忆。先跑短测检查显存和 loss，再启动正式训练。评测用 `BUTTONS_INSTRUCTION_STYLE=paper`，默认读取该运行保存的记忆容量。
+
 严格成功要求三键按序触发、松开后回到等待位。论文分数按前三次触发的位置给分，每按对一个位置得 30 分，三次都对再加 10 分，平均分满分为 100。为保证能评分三个位置，评测在前两次出现错按时仍允许继续。仿真以按钮关节位移达到 3 mm 为触发，同一仿真时刻的多键触发不计有序得分。论文的真机试验允许轻触，采用三种顺序各 5 回合。 [MemoryVLA 附录 D](https://arxiv.org/html/2508.19236v2#A4)

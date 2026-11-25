@@ -17,9 +17,14 @@ gpus="${GPUS:-4}"
 frames="${GROUP_SIZE:-16}"
 memory="${MEM_LENGTH:-16}"
 save_interval="${SAVE_INTERVAL:-1000}"
+dataloader="${DATALOADER_TYPE:-group}"
 
 if [[ ! "$gpus" =~ ^[1-9][0-9]*$ || ! "$frames" =~ ^[1-9][0-9]*$ ]]; then
   echo "GPUS and GROUP_SIZE must be positive integers." >&2
+  exit 2
+fi
+if [[ "$dataloader" != group && "$dataloader" != stream ]]; then
+  echo "DATALOADER_TYPE must be group or stream." >&2
   exit 2
 fi
 
@@ -38,8 +43,8 @@ fi
 cd -- "$repo"
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
-# The upstream dataset yields one frame at a time and clears memory each forward.
-# Give each rank a complete group of frames from one episode.
+# Group mode gives each rank one group per batch. Stream mode keeps the
+# same per-rank batch size and reads successive frames from each episode.
 torchrun --standalone --nproc_per_node="$gpus" "$script_dir/train_entrypoint.py" \
   --pretrained_checkpoint "$checkpoint" \
   --is_resume False --resume_step 0 --resume_epoch 0 \
@@ -50,7 +55,7 @@ torchrun --standalone --nproc_per_node="$gpus" "$script_dir/train_entrypoint.py"
   --vla.freeze_vision_backbone True --vla.freeze_llm_backbone True \
   --vla.unfreeze_last_llm_layer False \
   --vla.learning_rate 2e-5 --vla.max_steps "$max_steps" \
-  --vla.shuffle_buffer_size 128 --dataloader_type group --group_size "$frames" \
+  --vla.shuffle_buffer_size 128 --dataloader_type "$dataloader" --group_size "$frames" \
   --mem_length "$memory" --future_action_window_size 15 \
   --action_model_type DiT-L --repeated_diffusion_steps 4 --use_ema False \
   --image_aug False --trackers '["jsonl"]' \
