@@ -183,4 +183,15 @@ GPUS=4 SAVE_INTERVAL=1000 bash "$PLAN/train.sh" "$MEMVLA_REPO" "$WORK/rlds/full"
 
 如果后续要比较 16 与 24 条记忆容量，并希望训练时用到第 17–24 条历史，两组均可设 `GROUP_SIZE=32`，仅改变 `MEM_LENGTH`。每卡 batch 同步增至 32 帧，需要单独做显存短跑。
 
-闭环策略评测在留出的布局上进行，分别记录完整顺序、重复按压和首次错按。上面的命令覆盖采集、导出和训练，首条仿真示范以及 GPU 短跑需要在服务器上确认。
+## 6. 闭环评测
+
+在已经激活 `buttons-sim` 的终端执行。启动器调用独立的 `memvla` Python 进程加载训练产物，通过同一运行目录的 `dataset_statistics.json` 反归一化 `custom_finetuning` 动作。第三个参数是推理卡的 `nvidia-smi` 编号，第四个参数是已验证的 VirtualGL EGL 设备。若 Python 安装在其他位置，使用 `SIM_PYTHON` 或 `MEMVLA_PYTHON` 指定绝对路径。
+
+```bash
+checkpoint="$WORK/runs/你的训练运行名/checkpoints/你的最终权重.pt"
+bash "$PLAN/run_eval.sh" "$WORK" "$checkpoint" 4 egl5 1
+```
+
+最后的 `1` 表示每种顺序先跑一条，共 6 回合。看到输出目录下的 `summary.json` 后，将 `1` 换成 `20` 评测完整的 120 条测试布局。启动器在后台运行，退出日志跟踪后仍会继续。每个回合的布局、实际按键、成功标记和分数写入 `episodes.jsonl`。全部回合结束后，`summary.json` 记录整体及各顺序的成功数、总数和平均分。
+
+严格成功要求三键按序触发、松开后回到等待位。论文分数按前三次触发的位置给分，每按对一个位置得 30 分，三次都对再加 10 分，平均分满分为 100。为保证能评分三个位置，评测在前两次出现错按时仍允许继续。仿真以按钮关节位移达到 3 mm 为触发，同一仿真时刻的多键触发不计有序得分。论文的真机试验允许轻触，采用三种顺序各 5 回合。 [MemoryVLA 附录 D](https://arxiv.org/html/2508.19236v2#A4)
