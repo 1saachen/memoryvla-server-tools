@@ -4,7 +4,7 @@ import argparse
 import itertools
 import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import NamedTemporaryFile
 
 import numpy as np
 from PIL import Image
@@ -198,18 +198,23 @@ def collect_episode(env_task, variation, stride):
     )
 
 
-def collect_shared_layout(env_task, orders, stride, seed):
+def check_shared_start(record, reference, order):
+    if not np.allclose(record["layout"], reference["layout"], atol=1e-4, rtol=0):
+        raise RuntimeError(f"Order {order}: planner reset produced a different button layout")
+    if (not np.allclose(record["arm_joints"][0], reference["arm_joints"][0], atol=0.005, rtol=0)
+            or not np.array_equal(record["gripper_closed"][0], reference["gripper_closed"][0])):
+        raise RuntimeError(f"Order {order}: initial robot configuration differs")
+
+
+def collect_shared_layout(env_task, orders, stride, seed, reference=None):
     records = {}
     for order in orders:
         np.random.seed(seed)
         record = collect_episode(env_task, order, stride)
-        if records:
-            reference = next(iter(records.values()))
-            if not np.allclose(record["layout"], reference["layout"], atol=1e-4, rtol=0):
-                raise RuntimeError(f"Order {order}: planner reset produced a different button layout")
-            if (not np.allclose(record["arm_joints"][0], reference["arm_joints"][0], atol=0.005, rtol=0)
-                    or not np.array_equal(record["gripper_closed"][0], reference["gripper_closed"][0])):
-                raise RuntimeError(f"Order {order}: initial robot configuration differs")
+        if reference is None:
+            reference = record
+        else:
+            check_shared_start(record, reference, order)
         records[order] = record
     return records
 
@@ -234,32 +239,58 @@ def save_episode(path, record, seed, settings, save_check_frames):
     print(f"{path}: {len(record['action'])} actions, presses {record['press_events'].tolist()}", flush=True)
 
 
-def collect_shared_layout_pilot(env_task, args, domain, settings):
-    for attempt in range(args.attempts):
-        seed = np.random.SeedSequence([args.seed, domain, attempt]).generate_state(1)[0]
-        print(f"Shared-layout attempt {attempt + 1}, seed {seed}", flush=True)
-        try:
-            records = collect_shared_layout(env_task, args.orders, args.stride, seed)
-            break
-        except (RuntimeError, InvalidActionError, TaskEnvironmentError) as err:
-            print(f"Shared-layout attempt {attempt + 1}: {err}", flush=True)
-    else:
-        raise RuntimeError(f"Shared layout failed after {args.attempts} attempts")
+def collect_shared_layouts(env_task, args, output, domain, settings):
+    for episode in range(args.per_order):
+        paths = {order: output / f"order{order}_episode{episode:05}.npz" for order in args.orders}
+        reference, saved_seed = None, None
+        missing = []
+        for order, path in paths.items():
+            if not path.exists():
+                missing.append(order)
+                continue
+            if not args.resume:
+                raise FileExistsError(f"{path} exists. Use --resume or a fresh directory.")
+            with np.load(path, allow_pickle=False) as saved:
+                if ("shared_layout" not in saved or not bool(saved["shared_layout"])
+                        or tuple(saved["collection_settings"]) != settings):
+                    raise ValueError(f"{path}: shared layout collection settings differ from this run.")
+                if reference is None:
+                    reference = {key: saved[key] for key in ("layout", "arm_joints", "gripper_closed")}
+                    saved_seed = int(saved["seed"])
+                    first_image = saved["image"][0].astype(np.int16)
+                else:
+                    if int(saved["seed"]) != saved_seed:
+                        raise ValueError(f"{path}: seed differs from the other orders in this layout.")
+                    check_shared_start(saved, reference, order)
 
-    # Publish the dataset only after the complete group has been validated and saved.
-    with TemporaryDirectory(dir=args.output.parent) as temporary:
-        staged = Path(temporary) / "data"
-        split_dir = staged / args.split
-        split_dir.mkdir(parents=True)
-        first_image = next(iter(records.values()))["image"][0].astype(np.int16)
+        if not missing:
+            print(f"Already collected: shared layout {episode + 1}/{args.per_order}", flush=True)
+            continue
+
+        for attempt in range(args.attempts):
+            seed_parts = [args.seed, domain, attempt]
+            if episode:
+                seed_parts.append(episode)
+            seed = saved_seed if saved_seed is not None else np.random.SeedSequence(seed_parts).generate_state(1)[0]
+            print(f"Shared layout {episode + 1}/{args.per_order}, attempt {attempt + 1}, seed {seed}", flush=True)
+            try:
+                records = collect_shared_layout(env_task, missing, args.stride, seed, reference)
+                break
+            except (RuntimeError, InvalidActionError, TaskEnvironmentError) as err:
+                print(f"Shared layout {episode + 1}, attempt {attempt + 1}: {err}", flush=True)
+        else:
+            raise RuntimeError(f"Shared layout {episode + 1} failed after {args.attempts} attempts")
+
+        if reference is None:
+            first_image = next(iter(records.values()))["image"][0].astype(np.int16)
         for order, record in records.items():
             record["shared_layout"] = np.asarray(True)
-            save_episode(split_dir / f"order{order}_episode00000.npz", record,
-                         seed, settings, args.save_check_frames)
+            save_episode(paths[order], record, seed, settings, args.save_check_frames)
             rgb_difference = np.abs(record["image"][0].astype(np.int16) - first_image).mean()
             print(f"Order {order}: starting RGB mean absolute difference = {rgb_difference:.3f}/255", flush=True)
-        staged.rename(args.output)
-    print(f"Shared layout verified: {len(records)} demonstrations saved in {args.output / args.split}", flush=True)
+        print(f"Shared layout verified: {len(paths)} demonstrations saved in {output}", flush=True)
+    total = args.per_order * len(args.orders)
+    print(f"Shared collection complete: {args.per_order} layouts, {total} demonstrations in {output}", flush=True)
 
 
 def main():
@@ -275,7 +306,7 @@ def main():
     parser.add_argument("--save-check-frames", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--shared-layout", action="store_true",
-                        help="Collect one pilot layout for all requested orders in a fresh output directory")
+                        help="Collect each layout for all requested orders")
     args = parser.parse_args()
     if min(args.per_order, args.stride, args.attempts) < 1 or args.seed < 0:
         parser.error("Counts must be positive and the seed must be nonnegative.")
@@ -283,14 +314,9 @@ def main():
         parser.error("Order indices must be in 0..5.")
 
     output = args.output / args.split
-    if args.shared_layout:
-        if args.per_order != 1 or args.resume or len(set(args.orders)) != len(args.orders):
-            parser.error("--shared-layout takes --per-order 1 and distinct orders without --resume")
-        if args.output.exists():
-            raise FileExistsError(f"{args.output} exists. Choose a fresh --output directory.")
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        output.mkdir(parents=True, exist_ok=True)
+    if args.shared_layout and len(set(args.orders)) != len(args.orders):
+        parser.error("--shared-layout requires distinct orders")
+    output.mkdir(parents=True, exist_ok=True)
     settings = (args.seed, args.stride, args.image_size)
     domain = ("train", "val", "test").index(args.split)
     env = make_environment(args.image_size)
@@ -298,7 +324,11 @@ def main():
     try:
         env_task = env.get_task(PushButtons)
         if args.shared_layout:
-            collect_shared_layout_pilot(env_task, args, domain, settings)
+            import fcntl
+
+            with (output / ".shared-collection.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                collect_shared_layouts(env_task, args, output, domain, settings)
             return
         for order in args.orders:
             for episode in range(args.per_order):
