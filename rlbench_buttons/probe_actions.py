@@ -15,17 +15,25 @@ from PIL import Image
 from eval_buttons import COLORS, read_policy
 
 
+RESET_POLICY_SEEDS = (7, 47, 107)
+RESET_ACTIONS = 16
+
+
+def predict_action_chunk(policy, frame, instruction, seed, first_frame):
+    with io.BytesIO() as image:
+        Image.fromarray(frame).save(image, format="PNG", compress_level=1)
+        request = {
+            "image": base64.b64encode(image.getvalue()).decode("ascii"),
+            "instruction": instruction, "first_frame": first_frame, "policy_seed": seed,
+        }
+    policy.stdin.write(json.dumps(request) + "\n")
+    return np.asarray(read_policy(policy))
+
+
 def predict_frames(policy, frames, instruction, seed):
     predictions = []
     for i, frame in enumerate(frames):
-        with io.BytesIO() as image:
-            Image.fromarray(frame).save(image, format="PNG", compress_level=1)
-            request = {
-                "image": base64.b64encode(image.getvalue()).decode("ascii"),
-                "instruction": instruction, "first_frame": i == 0, "policy_seed": seed,
-            }
-        policy.stdin.write(json.dumps(request) + "\n")
-        predictions.append(read_policy(policy)[0])
+        predictions.append(predict_action_chunk(policy, frame, instruction, seed, first_frame=i == 0)[0])
     return np.asarray(predictions)
 
 
@@ -44,23 +52,28 @@ def probe(policy, path, seed):
     return expert[:stop], predict_frames(policy, frames[:stop], instruction, seed)
 
 
-def compare_first_colors(policy, path, seed):
+def compare_first_colors(policy, path, seed, from_reset=False):
     with np.load(path, allow_pickle=False) as episode:
         ticks = episode["sim_ticks"]
         stop = int(np.searchsorted(ticks, episode["press_events"][0, 0]))
-        frames = episode["image"][:min(stop, 40)]
+        frame_count = 1 if from_reset else min(stop, 40)
+        frames = episode["image"][:frame_count]
         layout_xy = episode["layout"][:, :2]
         original_order = [int(index) for index in episode["order"]]
-    if not 0 < stop < len(ticks) or len(frames) != min(stop, 40):
+    if not 0 < stop < len(ticks) or len(frames) != frame_count:
         raise ValueError(f"Invalid first-press alignment: {path}")
 
-    print(f"Comparing first colors on {path.parent.name}/{path.stem} ({len(frames)} frames)", flush=True)
+    print(f"Comparing first colors on {path.parent.name}/{path.stem} ({len(frames)} frames, seed {seed})",
+          flush=True)
     sums_mm = {}
     for first in range(len(COLORS)):
         second, third = (index for index in original_order if index != first)
         a, b, c = (COLORS[index] for index in (first, second, third))
         instruction = f"Press the {a} button, then the {b} button, then the {c} button."
-        actions = predict_frames(policy, frames, instruction, seed)
+        if from_reset:
+            actions = predict_action_chunk(policy, frames[0], instruction, seed, first_frame=True)
+        else:
+            actions = predict_frames(policy, frames, instruction, seed)
         sums_mm[first] = 1000 * actions[:, :2].sum(axis=0)
 
     toward_target_mm = {}
@@ -76,6 +89,8 @@ def compare_first_colors(policy, path, seed):
         "split": path.parent.name,
         "episode_id": path.stem,
         "frames": len(frames),
+        "predicted_actions": len(actions),
+        "policy_seed": seed,
         "xy_cmd_sum_mm": {COLORS[index]: value.round(2).tolist() for index, value in sums_mm.items()},
         "pairwise_toward_target_mm": toward_target_mm,
     }
@@ -108,7 +123,11 @@ def main():
                         help="Probe one split (default: train and val, or val for first-color comparison)")
     parser.add_argument("--compare-first-color", action="store_true",
                         help="Compare three first-button prompts on identical approach observations")
+    parser.add_argument("--from-reset", action="store_true",
+                        help="With --compare-first-color, evaluate only the initial frame and its 16-action chunk")
     args = parser.parse_args()
+    if args.from_reset and not args.compare_first_color:
+        parser.error("--from-reset requires --compare-first-color")
     checkpoint, data = args.checkpoint.resolve(), args.data.resolve()
     if args.compare_first_color:
         cases = [data / (args.split or "val") / f"order{order}_episode00000.npz" for order in (0, 2, 4)]
@@ -124,7 +143,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, "-u", str(Path(__file__).with_name("eval_buttons.py").resolve()),
-        "--policy-worker", str(checkpoint), "1", "0",
+        "--policy-worker", str(checkpoint), str(RESET_ACTIONS if args.from_reset else 1), "0",
     ]
     results = {}
     color_results = []
@@ -137,9 +156,10 @@ def main():
             print(f"Memory capacity: {info['mem_length']}", flush=True)
             for path in cases:
                 if args.compare_first_color:
-                    comparison = compare_first_colors(policy, path, seed=47)
-                    color_results.append(comparison)
-                    print(f"first_color {json.dumps(comparison)}", flush=True)
+                    for seed in RESET_POLICY_SEEDS if args.from_reset else (47,):
+                        comparison = compare_first_colors(policy, path, seed, from_reset=args.from_reset)
+                        color_results.append(comparison)
+                        print(f"first_color {json.dumps(comparison)}", flush=True)
                     continue
                 expert, predicted = probe(policy, path, seed=47)
                 split = path.parent.name
@@ -167,8 +187,12 @@ def main():
                 policy.terminate()
     summary = {
         "checkpoint": str(checkpoint), "mem_length": info["mem_length"],
-        "axis_order": ["x", "y", "z", "roll", "pitch", "yaw"], "policy_seed": 47,
+        "axis_order": ["x", "y", "z", "roll", "pitch", "yaw"],
     }
+    if args.from_reset:
+        summary["policy_seeds"] = RESET_POLICY_SEEDS
+    else:
+        summary["policy_seed"] = 47
     if args.compare_first_color:
         summary["first_color_comparison"] = color_results
     else:
