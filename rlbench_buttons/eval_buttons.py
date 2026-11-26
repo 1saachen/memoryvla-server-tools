@@ -1,6 +1,7 @@
 """Evaluate a MemoryVLA policy on the saved RLBench button test layouts."""
 
 import argparse
+from bisect import bisect_left
 import contextlib
 import itertools
 import json
@@ -16,6 +17,8 @@ ORDERS = tuple(itertools.permutations(range(3)))
 CHUNK_STEPS = 4
 MAX_CHUNK_STEPS = 16
 MAX_ACTIONS = 800
+HANDOFF_LEAD = 5
+HANDOFF_MAX_ACTIONS = 20
 POLICY_SEED = 7
 CFG_SCALE = 1.5
 DDIM_STEPS = 10
@@ -97,14 +100,36 @@ def read_policy(process):
     return json.loads(line)
 
 
-def evaluate(args):
+def expert_prefix_steps(ticks, first_press_tick):
+    # Observation i precedes action i, and the press is seen by observation i + 1.
+    press_frame = bisect_left(ticks, first_press_tick)
+    if not HANDOFF_LEAD <= press_frame < len(ticks):
+        raise ValueError(f"Cannot start {HANDOFF_LEAD} actions before press tick {first_press_tick}")
+    return press_frame - HANDOFF_LEAD
+
+
+def request_actions(policy, obs, instruction, first_frame, policy_seed):
     import base64
     import io
     import numpy as np
     from PIL import Image
+
+    with io.BytesIO() as image:
+        rgb = np.asarray(obs.front_rgb, dtype=np.uint8)
+        Image.fromarray(rgb).save(image, format="PNG", compress_level=1)
+        request = {
+            "image": base64.b64encode(image.getvalue()).decode("ascii"),
+            "instruction": instruction, "first_frame": first_frame, "policy_seed": policy_seed,
+        }
+    policy.stdin.write(json.dumps(request) + "\n")
+    return read_policy(policy)
+
+
+def evaluate(args):
+    import numpy as np
     from rlbench.backend.exceptions import InvalidActionError
     from collect import PushButtons as CollectedPushButtons
-    from collect import apply_delta, button_positions, make_environment
+    from collect import apply_delta, button_positions, delta_to, make_environment
     from demo_reset import reset_demo
     from instructions import paper_instruction
 
@@ -112,6 +137,12 @@ def evaluate(args):
         # Keep the class name for RLBench's asset lookup. During the policy
         # rollout, allow all three scored positions even after an early error.
         scoring_rollout = False
+        peak_displacement = None
+
+        def step(self):
+            super().step()
+            if self.peak_displacement is not None:
+                np.maximum(self.peak_displacement, self.displacement(), out=self.peak_displacement)
 
         def success(self):
             success, done = super().success()
@@ -141,6 +172,7 @@ def evaluate(args):
                      "--policy-worker", str(args.checkpoint), str(args.chunk_steps),
                      str(args.mem_length or 0)]
     rows = []
+    max_actions = HANDOFF_MAX_ACTIONS if args.first_press_handoff else MAX_ACTIONS
     with contextlib.ExitStack() as files:
         episodes = files.enter_context((args.output / "episodes.jsonl").open("x", encoding="utf-8"))
         trace = (files.enter_context((args.output / "trajectory.jsonl").open("x", encoding="utf-8"))
@@ -164,11 +196,18 @@ def evaluate(args):
                     task = env_task._task
                     for order, idx, path in cases:
                         expected_order = ORDERS[order]
+                        prefix_steps = 0
                         with np.load(path, allow_pickle=False) as demo_file:
                             seed = int(demo_file["seed"].item())
                             layout = demo_file["layout"]
                             saved_order = tuple(int(button) for button in demo_file["order"])
                             saved_instruction = str(demo_file["instruction"].item())
+                            if args.first_press_handoff:
+                                prefix_steps = expert_prefix_steps(
+                                    demo_file["sim_ticks"], int(demo_file["press_events"][0, 0]),
+                                )
+                                prefix_poses = demo_file["pose"][:prefix_steps + 1]
+                                prefix_grippers = demo_file["action"][:prefix_steps, 6]
                         if saved_order != expected_order:
                             raise RuntimeError(
                                 f"{path.name}: saved order {saved_order} does not match {expected_order}"
@@ -178,6 +217,7 @@ def evaluate(args):
                         np.random.seed(seed)
                         env_task.set_variation(order)
                         task.scoring_rollout = False
+                        task.peak_displacement = None
                         demo = env_task.get_demos(1, live_demos=True, max_attempts=2)[0]
                         descriptions, obs = reset_demo(env_task, demo, order, expected_order)
                         del demo
@@ -189,24 +229,31 @@ def evaluate(args):
                         instruction = (paper_instruction(expected_order)
                                        if args.instruction_style == "paper" else saved_instruction)
                         print(f"Policy instruction {path.stem}: {instruction}", flush=True)
-                        task.scoring_rollout = True
-
                         reward, done, steps = 0, False, 0
                         error = None
                         policy_seed = POLICY_SEED + order * 20 + idx
-                        while steps < MAX_ACTIONS and not done:
-                            with io.BytesIO() as image:
-                                rgb = np.asarray(obs.front_rgb, dtype=np.uint8)
-                                Image.fromarray(rgb).save(image, format="PNG", compress_level=1)
-                                request = {
-                                    "image": base64.b64encode(image.getvalue()).decode("ascii"),
-                                    "instruction": instruction,
-                                    "first_frame": steps == 0,
-                                    "policy_seed": policy_seed,
-                                }
-                            policy.stdin.write(json.dumps(request) + "\n")
-                            actions = read_policy(policy)
-                            for action in actions[:min(args.chunk_steps, MAX_ACTIONS - steps)]:
+                        if args.first_press_handoff:
+                            print(f"Replaying {prefix_steps} expert actions with policy observations", flush=True)
+                            for index, (target, gripper) in enumerate(zip(prefix_poses[1:], prefix_grippers)):
+                                request_actions(policy, obs, instruction, index == 0, policy_seed)
+                                expert_action = delta_to(obs.gripper_pose, target, gripper)
+                                obs, _, expert_done = apply_delta(env_task, expert_action)
+                                if task.events:
+                                    raise RuntimeError(f"{path.name}: expert pressed before handoff at action {index + 1}")
+                                if expert_done:
+                                    raise RuntimeError(f"{path.name}: expert rollout ended before handoff at action {index + 1}")
+                            if task.events:
+                                raise RuntimeError(f"{path.name}: button already pressed at handoff")
+                            task.peak_displacement = task.displacement()
+                            handoff_pose_error_mm = float(1000 * np.linalg.norm(
+                                obs.gripper_pose[:3] - prefix_poses[-1, :3],
+                            ))
+                            print(f"Model handoff after {prefix_steps} expert actions", flush=True)
+                        task.scoring_rollout = True
+                        while steps < max_actions and not done:
+                            actions = request_actions(policy, obs, instruction,
+                                                      prefix_steps == 0 and steps == 0, policy_seed)
+                            for action in actions[:min(args.chunk_steps, max_actions - steps)]:
                                 steps += 1
                                 if trace is not None:
                                     before = np.asarray(obs.gripper_pose).copy()
@@ -217,6 +264,8 @@ def evaluate(args):
                                     obs, reward, done = apply_delta(env_task, action)
                                 except InvalidActionError as exc:
                                     error = str(exc)
+                                    done = True
+                                if args.first_press_handoff and task.events:
                                     done = True
                                 if trace is not None:
                                     print(json.dumps({
@@ -243,14 +292,29 @@ def evaluate(args):
                             "instruction": instruction,
                             "press_events": [[t, COLORS[i]] for t, i in task.events],
                             "layout_seed": seed, "policy_seed": policy_seed,
-                            "steps": steps, "success": bool(reward),
-                            "score": score_presses(expected_order, task.events),
-                            "end_reason": (
-                                "success" if reward else "invalid_action" if error is not None
-                                else "wrong_or_simultaneous_press" if done else "action_limit"
-                            ),
-                            "error": error,
+                            "steps": steps, "error": error,
                         }
+                        if args.first_press_handoff:
+                            first_button = expected_order[0]
+                            row.update(
+                                expert_steps=prefix_steps,
+                                handoff_pose_error_mm=handoff_pose_error_mm,
+                                first_button_correct=score_presses((first_button,), task.events) == 30,
+                                first_button_peak_mm=float(1000 * task.peak_displacement[first_button]),
+                                end_reason=(
+                                    "invalid_action" if error is not None else "button_press" if task.events
+                                    else "action_limit"
+                                ),
+                            )
+                        else:
+                            row.update(
+                                success=bool(reward),
+                                score=score_presses(expected_order, task.events),
+                                end_reason=(
+                                    "success" if reward else "invalid_action" if error is not None
+                                    else "wrong_or_simultaneous_press" if done else "action_limit"
+                                ),
+                            )
                         rows.append(row)
                         line = json.dumps(row)
                         print(line, file=episodes, flush=True)
@@ -265,14 +329,22 @@ def evaluate(args):
         "checkpoint": str(args.checkpoint), "split": "test",
         "unnorm_key": UNNORM_KEY, "chunk_steps": args.chunk_steps,
         "mem_length": mem_length, "instruction_style": args.instruction_style,
-        "max_actions": MAX_ACTIONS, "policy_seed_base": POLICY_SEED,
+        "max_actions": max_actions, "policy_seed_base": POLICY_SEED,
         "cfg_scale": CFG_SCALE, "ddim_steps": DDIM_STEPS, "precision": "fp32",
         "press_detection": "RLBench button joint displacement >= 0.003 m",
-        "scoring": "30 per position matched by a distinct-time press, plus 10 for all three",
-        **summarize(rows),
-        "per_order": {str(order): summarize([r for r in rows if r["order_id"] == order])
-                      for order in selected_orders},
     }
+    if args.first_press_handoff:
+        summary.update(
+            mode="first_press_handoff",
+            handoff_actions_before_press=HANDOFF_LEAD,
+            first_button_correct=sum(row["first_button_correct"] for row in rows),
+            episodes=len(rows),
+        )
+    else:
+        summary.update(summarize(rows))
+        summary["scoring"] = "30 per position matched by a distinct-time press, plus 10 for all three"
+        summary["per_order"] = {str(order): summarize([r for r in rows if r["order_id"] == order])
+                                for order in selected_orders}
     summary_file = args.output / "summary.json"
     temporary = summary_file.with_suffix(".tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -294,6 +366,8 @@ def main():
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
     parser.add_argument("--order", type=int, choices=range(len(ORDERS)), help="Evaluate one button order")
     parser.add_argument("--trace", action="store_true", help="Record per-action poses and model commands")
+    parser.add_argument("--first-press-handoff", action="store_true",
+                        help="Replay the expert up to five actions before the first press, then test the policy")
     parser.add_argument("--chunk-steps", type=int, default=CHUNK_STEPS, metavar="1..16",
                         help="Actions executed before the next policy observation")
     parser.add_argument("--mem-length", type=int, help="Override checkpoint memory capacity for inference")
@@ -301,6 +375,8 @@ def main():
     args = parser.parse_args()
     if not 1 <= args.chunk_steps <= MAX_CHUNK_STEPS:
         parser.error(f"--chunk-steps must be between 1 and {MAX_CHUNK_STEPS}")
+    if args.first_press_handoff and args.chunk_steps != 1:
+        parser.error("--first-press-handoff requires --chunk-steps 1")
     if args.mem_length is not None and args.mem_length < 1:
         parser.error("--mem-length must be positive")
     args.checkpoint = args.checkpoint.resolve()

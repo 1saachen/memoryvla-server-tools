@@ -1,10 +1,21 @@
 import unittest
 
-from rlbench_buttons.eval_buttons import score_presses, summarize
+from rlbench_buttons.eval_buttons import expert_prefix_steps, score_presses, summarize
 from rlbench_buttons.instructions import paper_instruction
 
 
 class ButtonMetricsTest(unittest.TestCase):
+    def test_handoff_leaves_five_actions_including_the_trigger_action(self):
+        ticks = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+        self.assertEqual(expert_prefix_steps(ticks, 15), 3)
+        self.assertEqual(expert_prefix_steps(ticks, 16), 3)
+
+    def test_handoff_requires_a_trigger_within_the_recorded_actions(self):
+        ticks = [0, 2, 4, 6, 8, 10, 12]
+        for tick in (0, 8, 13):
+            with self.subTest(tick=tick), self.assertRaises(ValueError):
+                expert_prefix_steps(ticks, tick)
+
     def test_paper_instruction_preserves_target_order(self):
         self.assertEqual(
             paper_instruction((1, 0, 2)),

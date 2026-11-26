@@ -200,6 +200,8 @@ bash "$PLAN/run_eval.sh" "$WORK" "$checkpoint" 4 egl5 1
 
 排查 IK 失败时，可用 `BUTTONS_ORDER=2 BUTTONS_TRACE=1` 并传入每种顺序 1 回合。结果目录的 `trajectory.jsonl` 会记录每步的末端位姿、预测动作、到首键的水平距离和实际按钮位移。最后一条包含未能执行的动作和错误。省略这两个环境变量即按原方式运行。
 
+要测试模型在接近首键后能否按下，可设 `BUTTONS_FIRST_PRESS_HANDOFF=1 BUTTONS_CHUNK_STEPS=1 BUTTONS_ORDER=2 BUTTONS_TRACE=1`，并传入每种顺序 1 回合。专家按保存位姿走到距离示范首次触发还剩 5 个动作的位置。模型从第一帧开始更新记忆，接管后最多执行 20 步，首次检测到按键后结束。`episodes.jsonl` 记录 `first_button_correct`、目标首键在接管后的最大位移 `first_button_peak_mm`，以及接管时与保存位姿的 XYZ 差 `handoff_pose_error_mm`。从 `latest-buttons-handoff.txt` 可找到最新接管测试目录。
+
 用同一权重对照论文设置时，可以分别设 `BUTTONS_INSTRUCTION_STYLE=paper`、`BUTTONS_MEM_LENGTH=256` 或 `BUTTONS_CHUNK_STEPS=10`。第一项按论文表 18 的模板生成指令，例如 `Push the green, blue, and pink buttons in sequence`。第二项只覆盖推理记忆容量。第三项对应作者公开真机部署脚本的动作返回窗口，论文未单独给出按钮实验的执行窗口。一次只改一项可以区分各设置的影响。`episodes.jsonl` 会记录实际传给模型的指令，`summary.json` 会记录实际容量、指令模板和动作执行步数。 [论文表 18](https://arxiv.org/html/2508.19236v2#A11.T18) · [作者部署脚本](https://github.com/shihao1895/MemoryVLA/blob/d732ea9072bc063399ccc817aed74ab172eb50be/script/eval/real_world/deploy.sh)
 
 如果要让训练和评测都采用论文模板，可从现有 NPZ 导出到新目录。评测时也设 `BUTTONS_INSTRUCTION_STYLE=paper`。

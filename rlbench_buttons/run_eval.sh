@@ -17,6 +17,15 @@ if [[ ! "$chunk_steps" =~ ^([1-9]|1[0-6])$ ]]; then
     exit 2
 fi
 eval_options=(--chunk-steps "$chunk_steps" --instruction-style "${BUTTONS_INSTRUCTION_STYLE:-saved}")
+output_kind=buttons
+if [[ "${BUTTONS_FIRST_PRESS_HANDOFF:-0}" == 1 ]]; then
+    if [[ "$chunk_steps" != 1 ]]; then
+        echo 'BUTTONS_FIRST_PRESS_HANDOFF=1 requires BUTTONS_CHUNK_STEPS=1.' >&2
+        exit 2
+    fi
+    eval_options+=(--first-press-handoff)
+    output_kind=buttons-handoff
+fi
 if [[ -n "${BUTTONS_ORDER:-}" ]]; then
     if [[ ! "$BUTTONS_ORDER" =~ ^[0-5]$ ]]; then
         echo 'BUTTONS_ORDER must be between 0 and 5.' >&2
@@ -69,7 +78,7 @@ if ! grep -i '^OpenGL renderer string:.*NVIDIA' <<< "$renderer"; then
 fi
 
 mkdir -p "$work/evals"
-output="$(mktemp -d "$work/evals/buttons-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+output="$(mktemp -d "$work/evals/$output_kind-$(date +%Y%m%d-%H%M%S).XXXXXX")"
 nohup xvfb-run -a -s '-screen 0 1024x768x24' "$vgl" -d "$render_egl" \
     "$sim_python" -u "$script_dir/eval_buttons.py" --data "$work/data/full" \
     --checkpoint "$checkpoint" --output "$output" --model-repo "$model_repo" \
@@ -78,6 +87,10 @@ nohup xvfb-run -a -s '-screen 0 1024x768x24' "$vgl" -d "$render_egl" \
     > "$output/eval.log" 2>&1 < /dev/null &
 eval_pid=$!
 printf '%s\n' "$eval_pid" > "$output/eval.pid"
-printf '%s\n' "$output" > "$work/evals/latest-buttons-eval.txt"
+if [[ "$output_kind" == buttons-handoff ]]; then
+    printf '%s\n' "$output" > "$work/evals/latest-buttons-handoff.txt"
+else
+    printf '%s\n' "$output" > "$work/evals/latest-buttons-eval.txt"
+fi
 printf 'PID=%s\nLog=%s/eval.log\nResults=%s\n' "$eval_pid" "$output" "$output"
 tail --pid="$eval_pid" -n 20 -f "$output/eval.log"
