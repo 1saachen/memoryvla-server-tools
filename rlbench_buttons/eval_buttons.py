@@ -173,6 +173,8 @@ def evaluate(args):
                      str(args.mem_length or 0)]
     rows = []
     max_actions = HANDOFF_MAX_ACTIONS if args.first_press_handoff else MAX_ACTIONS
+    close_gripper = args.close_gripper or args.handoff_close_gripper
+    gripper_control = "closed" if close_gripper else "policy"
     with contextlib.ExitStack() as files:
         episodes = files.enter_context((args.output / "episodes.jsonl").open("x", encoding="utf-8"))
         trace = (files.enter_context((args.output / "trajectory.jsonl").open("x", encoding="utf-8"))
@@ -255,7 +257,7 @@ def evaluate(args):
                                                       prefix_steps == 0 and steps == 0, policy_seed)
                             for action in actions[:min(args.chunk_steps, max_actions - steps)]:
                                 steps += 1
-                                executed_action = action[:6] + [0.0] if args.handoff_close_gripper else action
+                                executed_action = action[:6] + [0.0] if close_gripper else action
                                 if trace is not None:
                                     before = np.asarray(obs.gripper_pose).copy()
                                     joints = np.asarray(obs.joint_positions).copy()
@@ -292,6 +294,7 @@ def evaluate(args):
                             "episode_id": path.stem, "order_id": order,
                             "target": [COLORS[i] for i in expected_order],
                             "instruction": instruction,
+                            "gripper_control": gripper_control,
                             "press_events": [[t, COLORS[i]] for t, i in task.events],
                             "layout_seed": seed, "policy_seed": policy_seed,
                             "steps": steps, "error": error,
@@ -300,7 +303,7 @@ def evaluate(args):
                             first_button = expected_order[0]
                             row.update(
                                 expert_steps=prefix_steps,
-                                handoff_gripper="closed" if args.handoff_close_gripper else "policy",
+                                handoff_gripper=gripper_control,
                                 handoff_pose_error_mm=handoff_pose_error_mm,
                                 first_button_correct=score_presses((first_button,), task.events) == 30,
                                 first_button_peak_mm=float(1000 * task.peak_displacement[first_button]),
@@ -332,6 +335,7 @@ def evaluate(args):
         "checkpoint": str(args.checkpoint), "split": "test",
         "unnorm_key": UNNORM_KEY, "chunk_steps": args.chunk_steps,
         "mem_length": mem_length, "instruction_style": args.instruction_style,
+        "gripper_control": gripper_control,
         "max_actions": max_actions, "policy_seed_base": POLICY_SEED,
         "cfg_scale": CFG_SCALE, "ddim_steps": DDIM_STEPS, "precision": "fp32",
         "press_detection": "RLBench button joint displacement >= 0.003 m",
@@ -339,7 +343,7 @@ def evaluate(args):
     if args.first_press_handoff:
         summary.update(
             mode="first_press_handoff",
-            handoff_gripper="closed" if args.handoff_close_gripper else "policy",
+            handoff_gripper=gripper_control,
             handoff_actions_before_press=HANDOFF_LEAD,
             first_button_correct=sum(row["first_button_correct"] for row in rows),
             episodes=len(rows),
@@ -370,6 +374,8 @@ def main():
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
     parser.add_argument("--order", type=int, choices=range(len(ORDERS)), help="Evaluate one button order")
     parser.add_argument("--trace", action="store_true", help="Record per-action poses and model commands")
+    parser.add_argument("--close-gripper", action="store_true",
+                        help="Command a closed gripper whenever the policy controls the arm")
     parser.add_argument("--first-press-handoff", action="store_true",
                         help="Replay the expert up to five actions before the first press, then test the policy")
     parser.add_argument("--handoff-close-gripper", action="store_true",

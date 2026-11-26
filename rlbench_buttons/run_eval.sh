@@ -18,6 +18,7 @@ if [[ ! "$chunk_steps" =~ ^([1-9]|1[0-6])$ ]]; then
 fi
 eval_options=(--chunk-steps "$chunk_steps" --instruction-style "${BUTTONS_INSTRUCTION_STYLE:-saved}")
 output_kind=buttons
+close_gripper="${BUTTONS_CLOSE_GRIPPER:-0}"
 if [[ "${BUTTONS_FIRST_PRESS_HANDOFF:-0}" == 1 ]]; then
     if [[ "$chunk_steps" != 1 ]]; then
         echo 'BUTTONS_FIRST_PRESS_HANDOFF=1 requires BUTTONS_CHUNK_STEPS=1.' >&2
@@ -31,8 +32,11 @@ if [[ "${BUTTONS_HANDOFF_CLOSE_GRIPPER:-0}" == 1 ]]; then
         echo 'BUTTONS_HANDOFF_CLOSE_GRIPPER=1 requires BUTTONS_FIRST_PRESS_HANDOFF=1.' >&2
         exit 2
     fi
-    eval_options+=(--handoff-close-gripper)
-    output_kind=buttons-handoff-closed-gripper
+    close_gripper=1
+fi
+if [[ "$close_gripper" == 1 ]]; then
+    eval_options+=(--close-gripper)
+    output_kind="$output_kind-closed-gripper"
 fi
 if [[ -n "${BUTTONS_ORDER:-}" ]]; then
     if [[ ! "$BUTTONS_ORDER" =~ ^[0-5]$ ]]; then
