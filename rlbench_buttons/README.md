@@ -162,6 +162,8 @@ bash "$PLAN/collect_batch.sh" "$WORK"
 
 参数可依次指定每种顺序的训练、验证、测试条数，例如 `bash "$PLAN/collect_batch.sh" "$WORK" 50 10 10`。要另建一套数据时，通过 `BUTTONS_OUTPUT_DIR` 指定新的目录，导出时也要相应设置 `--source` 和新的 `--data-root`。若单条轨迹耗尽默认的 12 次规划与回放尝试，可在原命令前加 `BUTTONS_ATTEMPTS=30` 继续。
 
+要在同一桌面上分别采集先按蓝、绿、粉的示范，用 `collect.py --shared-layout --split train --per-order 1 --orders 0 2 4 --output <新目录>`。采集器为三个顺序使用同一布局种子，逐条验收按键顺序和回位，并核对按钮位置与机械臂起始关节状态。整组三条通过检查后，才会出现在新目录中。原 NPZ 和 RLDS 可以继续独立使用。
+
 确认三组计数后，切回训练环境导出 RLDS。默认应报告 1,200 条训练轨迹，验证和测试轨迹保留为 NPZ。
 
 ```bash

@@ -4,7 +4,7 @@ import argparse
 import itertools
 import os
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 import numpy as np
 from PIL import Image
@@ -198,6 +198,70 @@ def collect_episode(env_task, variation, stride):
     )
 
 
+def collect_shared_layout(env_task, orders, stride, seed):
+    records = {}
+    for order in orders:
+        np.random.seed(seed)
+        record = collect_episode(env_task, order, stride)
+        if records:
+            reference = next(iter(records.values()))
+            if not np.allclose(record["layout"], reference["layout"], atol=1e-4, rtol=0):
+                raise RuntimeError(f"Order {order}: planner reset produced a different button layout")
+            if (not np.allclose(record["arm_joints"][0], reference["arm_joints"][0], atol=0.005, rtol=0)
+                    or not np.array_equal(record["gripper_closed"][0], reference["gripper_closed"][0])):
+                raise RuntimeError(f"Order {order}: initial robot configuration differs")
+        records[order] = record
+    return records
+
+
+def save_episode(path, record, seed, settings, save_check_frames):
+    record["seed"] = np.asarray(seed)
+    record["collection_settings"] = np.asarray(settings)
+    with NamedTemporaryFile(dir=path.parent, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with tmp_path.open("wb") as stream:
+            np.savez_compressed(stream, **record)
+        os.link(tmp_path, path)
+    finally:
+        tmp_path.unlink()
+    if save_check_frames:
+        frames = record["image"][record["home_indices"]]
+        Image.fromarray(np.concatenate(frames, axis=1)).save(path.with_name(f"{path.stem}_home.png"))
+        print("home arm-joint max error (rad):",
+              np.max(np.abs(record["arm_joints"][record["home_indices"]]
+                            - record["arm_joints"][0]), axis=1), flush=True)
+    print(f"{path}: {len(record['action'])} actions, presses {record['press_events'].tolist()}", flush=True)
+
+
+def collect_shared_layout_pilot(env_task, args, domain, settings):
+    for attempt in range(args.attempts):
+        seed = np.random.SeedSequence([args.seed, domain, attempt]).generate_state(1)[0]
+        print(f"Shared-layout attempt {attempt + 1}, seed {seed}", flush=True)
+        try:
+            records = collect_shared_layout(env_task, args.orders, args.stride, seed)
+            break
+        except (RuntimeError, InvalidActionError, TaskEnvironmentError) as err:
+            print(f"Shared-layout attempt {attempt + 1}: {err}", flush=True)
+    else:
+        raise RuntimeError(f"Shared layout failed after {args.attempts} attempts")
+
+    # Publish the dataset only after the complete group has been validated and saved.
+    with TemporaryDirectory(dir=args.output.parent) as temporary:
+        staged = Path(temporary) / "data"
+        split_dir = staged / args.split
+        split_dir.mkdir(parents=True)
+        first_image = next(iter(records.values()))["image"][0].astype(np.int16)
+        for order, record in records.items():
+            record["shared_layout"] = np.asarray(True)
+            save_episode(split_dir / f"order{order}_episode00000.npz", record,
+                         seed, settings, args.save_check_frames)
+            rgb_difference = np.abs(record["image"][0].astype(np.int16) - first_image).mean()
+            print(f"Order {order}: starting RGB mean absolute difference = {rgb_difference:.3f}/255", flush=True)
+        staged.rename(args.output)
+    print(f"Shared layout verified: {len(records)} demonstrations saved in {args.output / args.split}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -210,6 +274,8 @@ def main():
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--save-check-frames", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--shared-layout", action="store_true",
+                        help="Collect one pilot layout for all requested orders in a fresh output directory")
     args = parser.parse_args()
     if min(args.per_order, args.stride, args.attempts) < 1 or args.seed < 0:
         parser.error("Counts must be positive and the seed must be nonnegative.")
@@ -217,13 +283,23 @@ def main():
         parser.error("Order indices must be in 0..5.")
 
     output = args.output / args.split
-    output.mkdir(parents=True, exist_ok=True)
+    if args.shared_layout:
+        if args.per_order != 1 or args.resume or len(set(args.orders)) != len(args.orders):
+            parser.error("--shared-layout takes --per-order 1 and distinct orders without --resume")
+        if args.output.exists():
+            raise FileExistsError(f"{args.output} exists. Choose a fresh --output directory.")
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output.mkdir(parents=True, exist_ok=True)
     settings = (args.seed, args.stride, args.image_size)
     domain = ("train", "val", "test").index(args.split)
     env = make_environment(args.image_size)
     env.launch()
     try:
         env_task = env.get_task(PushButtons)
+        if args.shared_layout:
+            collect_shared_layout_pilot(env_task, args, domain, settings)
+            return
         for order in args.orders:
             for episode in range(args.per_order):
                 name = f"order{order}_episode{episode:05}"
@@ -248,24 +324,7 @@ def main():
                         print(f"{name} attempt {attempt + 1}: {err}", flush=True)
                 else:
                     raise RuntimeError(f"{name} failed after {args.attempts} attempts.")
-                record["seed"] = np.asarray(seed)
-                record["collection_settings"] = np.asarray(settings)
-                with NamedTemporaryFile(dir=output, delete=False) as tmp:
-                    tmp_path = Path(tmp.name)
-                try:
-                    with tmp_path.open("wb") as stream:
-                        np.savez_compressed(stream, **record)
-                    os.link(tmp_path, path)
-                finally:
-                    tmp_path.unlink()
-                if args.save_check_frames:
-                    frames = record["image"][record["home_indices"]]
-                    Image.fromarray(np.concatenate(frames, axis=1)).save(output / f"{name}_home.png")
-                    print("home arm-joint max error (rad):",
-                          np.max(np.abs(record["arm_joints"][record["home_indices"]]
-                                        - record["arm_joints"][0]), axis=1), flush=True)
-                print(f"{path}: {len(record['action'])} actions, presses {record['press_events'].tolist()}",
-                      flush=True)
+                save_episode(path, record, seed, settings, args.save_check_frames)
     finally:
         env.shutdown()
 
