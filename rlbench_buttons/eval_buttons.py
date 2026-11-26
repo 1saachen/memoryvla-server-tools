@@ -108,6 +108,21 @@ def expert_prefix_steps(ticks, first_press_tick):
     return press_frame - HANDOFF_LEAD
 
 
+def rank_layouts_near_start(test_dir, order):
+    import numpy as np
+
+    ranked = []
+    first_button = ORDERS[order][0]
+    pattern = f"order{order}_episode" + "[0-9]" * 5 + ".npz"
+    for path in sorted(test_dir.glob(pattern)):
+        with np.load(path, allow_pickle=False) as demo:
+            distances_mm = 1000 * np.linalg.norm(demo["layout"][:, :2] - demo["pose"][0, :2], axis=1)
+        if not np.isfinite(distances_mm).all():
+            raise ValueError(f"{path}: non-finite button distances")
+        ranked.append((path, float(distances_mm.max()), float(distances_mm[first_button])))
+    return sorted(ranked, key=lambda entry: entry[1])
+
+
 def request_actions(policy, obs, instruction, first_frame, policy_seed):
     import base64
     import io
@@ -152,8 +167,27 @@ def evaluate(args):
 
     test_dir = args.data / "test"
     selected_orders = range(len(ORDERS)) if args.order is None else (args.order,)
-    cases = [(order, idx, test_dir / f"order{order}_episode{idx:05}.npz")
-             for order in selected_orders for idx in range(args.per_order)]
+    near_layouts = {}
+    cases = []
+    for order in selected_orders:
+        if args.near_start:
+            ranked = rank_layouts_near_start(test_dir, order)
+            baseline = next((entry for entry in ranked if entry[0].stem.endswith("episode00000")), None)
+            if len(ranked) < args.per_order or baseline is None:
+                raise FileNotFoundError(f"Order {order} needs episode 00000 and at least {args.per_order} layouts")
+            for idx, (path, radius, first_distance) in enumerate(ranked[:args.per_order]):
+                near_layouts[path] = {
+                    "start_radius_mm": round(radius, 1),
+                    "first_button_start_xy_mm": round(first_distance, 1),
+                    "episode0_start_radius_mm": round(baseline[1], 1),
+                    "episode0_first_button_start_xy_mm": round(baseline[2], 1),
+                }
+                print(f"Selected {path.stem}: {json.dumps(near_layouts[path])}", flush=True)
+                # Match the policy seed of the corresponding unsorted rollout.
+                cases.append((order, idx, path))
+        else:
+            cases.extend((order, idx, test_dir / f"order{order}_episode{idx:05}.npz")
+                         for idx in range(args.per_order))
     for _, _, path in cases:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -321,6 +355,9 @@ def evaluate(args):
                                     else "wrong_or_simultaneous_press" if done else "action_limit"
                                 ),
                             )
+                        if args.near_start:
+                            row.update(near_layouts[path])
+                            row["first_button_correct"] = score_presses(expected_order[:1], task.events) == 30
                         rows.append(row)
                         line = json.dumps(row)
                         print(line, file=episodes, flush=True)
@@ -353,6 +390,9 @@ def evaluate(args):
         summary["scoring"] = "30 per position matched by a distinct-time press, plus 10 for all three"
         summary["per_order"] = {str(order): summarize([r for r in rows if r["order_id"] == order])
                                 for order in selected_orders}
+    if args.near_start:
+        summary.update(layout_selection="near_start",
+                       first_button_correct=sum(row["first_button_correct"] for row in rows))
     summary_file = args.output / "summary.json"
     temporary = summary_file.with_suffix(".tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -373,6 +413,8 @@ def main():
     parser.add_argument("--model-gpu", required=True, help="CUDA device UUID")
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
     parser.add_argument("--order", type=int, choices=range(len(ORDERS)), help="Evaluate one button order")
+    parser.add_argument("--near-start", action="store_true",
+                        help="Select test layouts by the farthest button's XY distance from the start")
     parser.add_argument("--trace", action="store_true", help="Record per-action poses and model commands")
     parser.add_argument("--close-gripper", action="store_true",
                         help="Command a closed gripper whenever the policy controls the arm")

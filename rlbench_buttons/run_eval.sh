@@ -38,6 +38,10 @@ if [[ "$close_gripper" == 1 ]]; then
     eval_options+=(--close-gripper)
     output_kind="$output_kind-closed-gripper"
 fi
+if [[ "${BUTTONS_NEAR_START:-0}" == 1 ]]; then
+    eval_options+=(--near-start)
+    output_kind="$output_kind-near-start"
+fi
 if [[ -n "${BUTTONS_ORDER:-}" ]]; then
     if [[ ! "$BUTTONS_ORDER" =~ ^[0-5]$ ]]; then
         echo 'BUTTONS_ORDER must be between 0 and 5.' >&2

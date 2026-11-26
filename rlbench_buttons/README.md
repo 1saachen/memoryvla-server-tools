@@ -206,6 +206,8 @@ bash "$PLAN/run_eval.sh" "$WORK" "$checkpoint" 4 egl5 1
 
 从初始位姿跑固定闭合对照时，设 `BUTTONS_CLOSE_GRIPPER=1`，并省略 `BUTTONS_FIRST_PRESS_HANDOFF`。从第一个模型动作起，发给仿真器的夹爪命令固定为闭合。`summary.json` 记录 `gripper_control`、完整任务成功率和位置评分。对照结果目录可从 `latest-buttons-closed-gripper.txt` 定位。
 
+用已有测试布局检查缩短移动距离的效果时，设 `BUTTONS_NEAR_START=1`。脚本按每种顺序下最远按钮到机械臂起始末端的水平距离排序，取指定条数。`episodes.jsonl` 记录所选布局和同顺序第 0 条布局的最大水平距离、首键水平距离与首键是否按对。同顺序下按评测次序使用原来的推理种子。固定闭合对照的输出目录可从 `latest-buttons-closed-gripper-near-start.txt` 定位。
+
 用同一权重对照论文设置时，可以分别设 `BUTTONS_INSTRUCTION_STYLE=paper`、`BUTTONS_MEM_LENGTH=256` 或 `BUTTONS_CHUNK_STEPS=10`。第一项按论文表 18 的模板生成指令，例如 `Push the green, blue, and pink buttons in sequence`。第二项只覆盖推理记忆容量。第三项对应作者公开真机部署脚本的动作返回窗口，论文未单独给出按钮实验的执行窗口。一次只改一项可以区分各设置的影响。`episodes.jsonl` 会记录实际传给模型的指令，`summary.json` 会记录实际容量、指令模板和动作执行步数。 [论文表 18](https://arxiv.org/html/2508.19236v2#A11.T18) · [作者部署脚本](https://github.com/shihao1895/MemoryVLA/blob/d732ea9072bc063399ccc817aed74ab172eb50be/script/eval/real_world/deploy.sh)
 
 如果要让训练和评测都采用论文模板，可从现有 NPZ 导出到新目录。评测时也设 `BUTTONS_INSTRUCTION_STYLE=paper`。

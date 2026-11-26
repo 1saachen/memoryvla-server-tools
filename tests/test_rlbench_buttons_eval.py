@@ -1,10 +1,29 @@
+from pathlib import Path
+import tempfile
 import unittest
 
-from rlbench_buttons.eval_buttons import expert_prefix_steps, score_presses, summarize
+from rlbench_buttons.eval_buttons import expert_prefix_steps, rank_layouts_near_start, score_presses, summarize
 from rlbench_buttons.instructions import paper_instruction
 
 
 class ButtonMetricsTest(unittest.TestCase):
+    def test_near_start_ranks_by_all_buttons_and_uses_horizontal_distance(self):
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            layouts = ([0.11, 0.31, 0.01], [0.13, 0.10, 0.15])
+            for index, offsets in enumerate(layouts):
+                x = np.asarray(offsets) + 0.4
+                layout = np.column_stack((x, [0.2] * 3, [0.75] * 3))
+                np.savez(root / f"order2_episode{index:05}.npz", layout=layout,
+                         pose=[[0.4, 0.2, 1.5, 0, 0, 0, 1]])
+            ranked = rank_layouts_near_start(root, 2)
+        self.assertEqual([path.stem for path, _, _ in ranked],
+                         ["order2_episode00001", "order2_episode00000"])
+        self.assertAlmostEqual(ranked[0][1], 150.0)
+        self.assertAlmostEqual(ranked[0][2], 100.0)
+
     def test_handoff_leaves_five_actions_including_the_trigger_action(self):
         ticks = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
         self.assertEqual(expert_prefix_steps(ticks, 15), 3)
