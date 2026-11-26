@@ -3,6 +3,7 @@
 import argparse
 import base64
 import io
+from itertools import combinations
 import json
 from pathlib import Path
 import subprocess
@@ -11,7 +12,21 @@ import sys
 import numpy as np
 from PIL import Image
 
-from eval_buttons import read_policy
+from eval_buttons import COLORS, read_policy
+
+
+def predict_frames(policy, frames, instruction, seed):
+    predictions = []
+    for i, frame in enumerate(frames):
+        with io.BytesIO() as image:
+            Image.fromarray(frame).save(image, format="PNG", compress_level=1)
+            request = {
+                "image": base64.b64encode(image.getvalue()).decode("ascii"),
+                "instruction": instruction, "first_frame": i == 0, "policy_seed": seed,
+            }
+        policy.stdin.write(json.dumps(request) + "\n")
+        predictions.append(read_policy(policy)[0])
+    return np.asarray(predictions)
 
 
 def probe(policy, path, seed):
@@ -26,17 +41,44 @@ def probe(policy, path, seed):
     if not 0 < stop <= len(expert) or len(frames) != len(expert) + 1:
         raise ValueError(f"Invalid first-press alignment: {path}")
     print(f"Probing {path.parent.name}/{path.stem}: {instruction} ({stop} frames)", flush=True)
-    predictions = []
-    for i in range(stop):
-        with io.BytesIO() as image:
-            Image.fromarray(frames[i]).save(image, format="PNG", compress_level=1)
-            request = {
-                "image": base64.b64encode(image.getvalue()).decode("ascii"),
-                "instruction": instruction, "first_frame": i == 0, "policy_seed": seed,
-            }
-        policy.stdin.write(json.dumps(request) + "\n")
-        predictions.append(read_policy(policy)[0])
-    return expert[:stop], np.asarray(predictions)
+    return expert[:stop], predict_frames(policy, frames[:stop], instruction, seed)
+
+
+def compare_first_colors(policy, path, seed):
+    with np.load(path, allow_pickle=False) as episode:
+        ticks = episode["sim_ticks"]
+        stop = int(np.searchsorted(ticks, episode["press_events"][0, 0]))
+        frames = episode["image"][:min(stop, 40)]
+        layout_xy = episode["layout"][:, :2]
+        original_order = [int(index) for index in episode["order"]]
+    if not 0 < stop < len(ticks) or len(frames) != min(stop, 40):
+        raise ValueError(f"Invalid first-press alignment: {path}")
+
+    print(f"Comparing first colors on {path.parent.name}/{path.stem} ({len(frames)} frames)", flush=True)
+    sums_mm = {}
+    for first in range(len(COLORS)):
+        second, third = (index for index in original_order if index != first)
+        a, b, c = (COLORS[index] for index in (first, second, third))
+        instruction = f"Press the {a} button, then the {b} button, then the {c} button."
+        actions = predict_frames(policy, frames, instruction, seed)
+        sums_mm[first] = 1000 * actions[:, :2].sum(axis=0)
+
+    toward_target_mm = {}
+    for a, b in combinations(range(len(COLORS)), 2):
+        separation = layout_xy[a] - layout_xy[b]
+        distance = np.linalg.norm(separation)
+        if not np.isfinite(distance) or distance == 0:
+            raise ValueError(f"Invalid horizontal button separation in {path}")
+        # A positive projection means the two prompts move the commands in the expected relative direction.
+        projected = np.dot(sums_mm[a] - sums_mm[b], separation / distance)
+        toward_target_mm[f"{COLORS[a]}_vs_{COLORS[b]}"] = round(float(projected), 2)
+    return {
+        "split": path.parent.name,
+        "episode_id": path.stem,
+        "frames": len(frames),
+        "xy_cmd_sum_mm": {COLORS[index]: value.round(2).tolist() for index, value in sums_mm.items()},
+        "pairwise_toward_target_mm": toward_target_mm,
+    }
 
 
 def summarize_actions(expert, predicted):
@@ -63,23 +105,29 @@ def main():
     parser.add_argument("data", type=Path, help="Original NPZ split directories")
     parser.add_argument("output", type=Path)
     parser.add_argument("--split", choices=("train", "val", "test"),
-                        help="Probe one split (default: train and val)")
+                        help="Probe one split (default: train and val, or val for first-color comparison)")
+    parser.add_argument("--compare-first-color", action="store_true",
+                        help="Compare three first-button prompts on identical approach observations")
     args = parser.parse_args()
     checkpoint, data = args.checkpoint.resolve(), args.data.resolve()
-    splits = (args.split,) if args.split else ("train", "val")
-    cases = [data / split / "order2_episode00000.npz" for split in splits]
+    if args.compare_first_color:
+        cases = [data / (args.split or "val") / f"order{order}_episode00000.npz" for order in (0, 2, 4)]
+    else:
+        splits = (args.split,) if args.split else ("train", "val")
+        cases = [data / split / "order2_episode00000.npz" for split in splits]
+        stats_path = checkpoint.parents[1] / "dataset_statistics.json"
+        bounds = json.loads(stats_path.read_text(encoding="utf-8"))["custom_finetuning"]["action"]
+        low, high = np.asarray(bounds["q01"][:6]), np.asarray(bounds["q99"][:6])
     for path in [checkpoint, *cases]:
         if not path.is_file():
             raise FileNotFoundError(path)
-    stats_path = checkpoint.parents[1] / "dataset_statistics.json"
-    bounds = json.loads(stats_path.read_text(encoding="utf-8"))["custom_finetuning"]["action"]
-    low, high = np.asarray(bounds["q01"][:6]), np.asarray(bounds["q99"][:6])
     args.output.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, "-u", str(Path(__file__).with_name("eval_buttons.py").resolve()),
         "--policy-worker", str(checkpoint), "1", "0",
     ]
     results = {}
+    color_results = []
     with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           text=True, encoding="utf-8", bufsize=1) as policy:
         try:
@@ -88,6 +136,11 @@ def main():
                 raise RuntimeError("Unexpected policy startup response")
             print(f"Memory capacity: {info['mem_length']}", flush=True)
             for path in cases:
+                if args.compare_first_color:
+                    comparison = compare_first_colors(policy, path, seed=47)
+                    color_results.append(comparison)
+                    print(f"first_color {json.dumps(comparison)}", flush=True)
+                    continue
                 expert, predicted = probe(policy, path, seed=47)
                 split = path.parent.name
                 np.savez_compressed(args.output / f"{split}_actions.npz",
@@ -112,12 +165,15 @@ def main():
             policy.stdin.close()
             if policy.poll() is None:
                 policy.terminate()
-    (args.output / "summary.json").write_text(
-        json.dumps({"checkpoint": str(checkpoint), "mem_length": info["mem_length"],
-                    "axis_order": ["x", "y", "z", "roll", "pitch", "yaw"],
-                    "policy_seed": 47, "splits": results}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    summary = {
+        "checkpoint": str(checkpoint), "mem_length": info["mem_length"],
+        "axis_order": ["x", "y", "z", "roll", "pitch", "yaw"], "policy_seed": 47,
+    }
+    if args.compare_first_color:
+        summary["first_color_comparison"] = color_results
+    else:
+        summary["splits"] = results
+    (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
