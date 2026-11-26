@@ -17,6 +17,16 @@ if [[ ! "$chunk_steps" =~ ^([1-9]|1[0-6])$ ]]; then
     exit 2
 fi
 eval_options=(--chunk-steps "$chunk_steps" --instruction-style "${BUTTONS_INSTRUCTION_STYLE:-saved}")
+if [[ -n "${BUTTONS_ORDER:-}" ]]; then
+    if [[ ! "$BUTTONS_ORDER" =~ ^[0-5]$ ]]; then
+        echo 'BUTTONS_ORDER must be between 0 and 5.' >&2
+        exit 2
+    fi
+    eval_options+=(--order "$BUTTONS_ORDER")
+fi
+if [[ "${BUTTONS_TRACE:-0}" == 1 ]]; then
+    eval_options+=(--trace)
+fi
 if [[ -n "${BUTTONS_MEM_LENGTH:-}" ]]; then
     if [[ ! "$BUTTONS_MEM_LENGTH" =~ ^[1-9][0-9]*$ ]]; then
         echo 'BUTTONS_MEM_LENGTH must be a positive integer.' >&2

@@ -120,8 +120,9 @@ def evaluate(args):
             return success, done
 
     test_dir = args.data / "test"
+    selected_orders = range(len(ORDERS)) if args.order is None else (args.order,)
     cases = [(order, idx, test_dir / f"order{order}_episode{idx:05}.npz")
-             for order in range(len(ORDERS)) for idx in range(args.per_order)]
+             for order in selected_orders for idx in range(args.per_order)]
     for _, _, path in cases:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -140,7 +141,10 @@ def evaluate(args):
                      "--policy-worker", str(args.checkpoint), str(args.chunk_steps),
                      str(args.mem_length or 0)]
     rows = []
-    with (args.output / "episodes.jsonl").open("x", encoding="utf-8") as episodes:
+    with contextlib.ExitStack() as files:
+        episodes = files.enter_context((args.output / "episodes.jsonl").open("x", encoding="utf-8"))
+        trace = (files.enter_context((args.output / "trajectory.jsonl").open("x", encoding="utf-8"))
+                 if args.trace else None)
         with subprocess.Popen(
             model_command, cwd=args.model_repo, env=policy_env, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
@@ -204,11 +208,33 @@ def evaluate(args):
                             actions = read_policy(policy)
                             for action in actions[:min(args.chunk_steps, MAX_ACTIONS - steps)]:
                                 steps += 1
+                                if trace is not None:
+                                    before = np.asarray(obs.gripper_pose).copy()
+                                    joints = np.asarray(obs.joint_positions).copy()
+                                    target_position = button_positions(task)[expected_order[0]]
+                                    tick_before = task.tick
                                 try:
                                     obs, reward, done = apply_delta(env_task, action)
                                 except InvalidActionError as exc:
                                     error = str(exc)
                                     done = True
+                                if trace is not None:
+                                    print(json.dumps({
+                                        "episode_id": path.stem, "step": steps,
+                                        "sim_tick_before": tick_before,
+                                        "eef_pose_before": before.tolist(),
+                                        "joint_positions_before": joints.tolist(),
+                                        "predicted_action": action,
+                                        "commanded_xyz": (before[:3] + action[:3]).tolist(),
+                                        "eef_pose_after": (list(map(float, obs.gripper_pose))
+                                                           if error is None else None),
+                                        "first_button_xyz": target_position.tolist(),
+                                        "first_button_xy_distance_mm": float(
+                                            1000 * np.linalg.norm(before[:2] - target_position[:2])
+                                        ),
+                                        "button_displacement_mm": (1000 * task.displacement()).tolist(),
+                                        "error": error,
+                                    }), file=trace, flush=True)
                                 if done:
                                     break
                         row = {
@@ -245,7 +271,7 @@ def evaluate(args):
         "scoring": "30 per position matched by a distinct-time press, plus 10 for all three",
         **summarize(rows),
         "per_order": {str(order): summarize([r for r in rows if r["order_id"] == order])
-                      for order in range(len(ORDERS))},
+                      for order in selected_orders},
     }
     summary_file = args.output / "summary.json"
     temporary = summary_file.with_suffix(".tmp")
@@ -266,6 +292,8 @@ def main():
     parser.add_argument("--model-repo", type=Path, required=True)
     parser.add_argument("--model-gpu", required=True, help="CUDA device UUID")
     parser.add_argument("--per-order", type=int, choices=range(1, 21), default=20, metavar="1..20")
+    parser.add_argument("--order", type=int, choices=range(len(ORDERS)), help="Evaluate one button order")
+    parser.add_argument("--trace", action="store_true", help="Record per-action poses and model commands")
     parser.add_argument("--chunk-steps", type=int, default=CHUNK_STEPS, metavar="1..16",
                         help="Actions executed before the next policy observation")
     parser.add_argument("--mem-length", type=int, help="Override checkpoint memory capacity for inference")
