@@ -255,13 +255,14 @@ def evaluate(args):
                                                       prefix_steps == 0 and steps == 0, policy_seed)
                             for action in actions[:min(args.chunk_steps, max_actions - steps)]:
                                 steps += 1
+                                executed_action = action[:6] + [0.0] if args.handoff_close_gripper else action
                                 if trace is not None:
                                     before = np.asarray(obs.gripper_pose).copy()
                                     joints = np.asarray(obs.joint_positions).copy()
                                     target_position = button_positions(task)[expected_order[0]]
                                     tick_before = task.tick
                                 try:
-                                    obs, reward, done = apply_delta(env_task, action)
+                                    obs, reward, done = apply_delta(env_task, executed_action)
                                 except InvalidActionError as exc:
                                     error = str(exc)
                                     done = True
@@ -274,6 +275,7 @@ def evaluate(args):
                                         "eef_pose_before": before.tolist(),
                                         "joint_positions_before": joints.tolist(),
                                         "predicted_action": action,
+                                        "executed_gripper": executed_action[6],
                                         "commanded_xyz": (before[:3] + action[:3]).tolist(),
                                         "eef_pose_after": (list(map(float, obs.gripper_pose))
                                                            if error is None else None),
@@ -298,6 +300,7 @@ def evaluate(args):
                             first_button = expected_order[0]
                             row.update(
                                 expert_steps=prefix_steps,
+                                handoff_gripper="closed" if args.handoff_close_gripper else "policy",
                                 handoff_pose_error_mm=handoff_pose_error_mm,
                                 first_button_correct=score_presses((first_button,), task.events) == 30,
                                 first_button_peak_mm=float(1000 * task.peak_displacement[first_button]),
@@ -336,6 +339,7 @@ def evaluate(args):
     if args.first_press_handoff:
         summary.update(
             mode="first_press_handoff",
+            handoff_gripper="closed" if args.handoff_close_gripper else "policy",
             handoff_actions_before_press=HANDOFF_LEAD,
             first_button_correct=sum(row["first_button_correct"] for row in rows),
             episodes=len(rows),
@@ -368,6 +372,8 @@ def main():
     parser.add_argument("--trace", action="store_true", help="Record per-action poses and model commands")
     parser.add_argument("--first-press-handoff", action="store_true",
                         help="Replay the expert up to five actions before the first press, then test the policy")
+    parser.add_argument("--handoff-close-gripper", action="store_true",
+                        help="Command a closed gripper during policy control in the handoff test")
     parser.add_argument("--chunk-steps", type=int, default=CHUNK_STEPS, metavar="1..16",
                         help="Actions executed before the next policy observation")
     parser.add_argument("--mem-length", type=int, help="Override checkpoint memory capacity for inference")
@@ -377,6 +383,8 @@ def main():
         parser.error(f"--chunk-steps must be between 1 and {MAX_CHUNK_STEPS}")
     if args.first_press_handoff and args.chunk_steps != 1:
         parser.error("--first-press-handoff requires --chunk-steps 1")
+    if args.handoff_close_gripper and not args.first_press_handoff:
+        parser.error("--handoff-close-gripper requires --first-press-handoff")
     if args.mem_length is not None and args.mem_length < 1:
         parser.error("--mem-length must be positive")
     args.checkpoint = args.checkpoint.resolve()

@@ -26,6 +26,14 @@ if [[ "${BUTTONS_FIRST_PRESS_HANDOFF:-0}" == 1 ]]; then
     eval_options+=(--first-press-handoff)
     output_kind=buttons-handoff
 fi
+if [[ "${BUTTONS_HANDOFF_CLOSE_GRIPPER:-0}" == 1 ]]; then
+    if [[ "$output_kind" != buttons-handoff ]]; then
+        echo 'BUTTONS_HANDOFF_CLOSE_GRIPPER=1 requires BUTTONS_FIRST_PRESS_HANDOFF=1.' >&2
+        exit 2
+    fi
+    eval_options+=(--handoff-close-gripper)
+    output_kind=buttons-handoff-closed-gripper
+fi
 if [[ -n "${BUTTONS_ORDER:-}" ]]; then
     if [[ ! "$BUTTONS_ORDER" =~ ^[0-5]$ ]]; then
         echo 'BUTTONS_ORDER must be between 0 and 5.' >&2
@@ -87,10 +95,9 @@ nohup xvfb-run -a -s '-screen 0 1024x768x24' "$vgl" -d "$render_egl" \
     > "$output/eval.log" 2>&1 < /dev/null &
 eval_pid=$!
 printf '%s\n' "$eval_pid" > "$output/eval.pid"
-if [[ "$output_kind" == buttons-handoff ]]; then
-    printf '%s\n' "$output" > "$work/evals/latest-buttons-handoff.txt"
-else
-    printf '%s\n' "$output" > "$work/evals/latest-buttons-eval.txt"
-fi
+case "$output_kind" in
+    buttons) printf '%s\n' "$output" > "$work/evals/latest-buttons-eval.txt" ;;
+    *) printf '%s\n' "$output" > "$work/evals/latest-$output_kind.txt" ;;
+esac
 printf 'PID=%s\nLog=%s/eval.log\nResults=%s\n' "$eval_pid" "$output" "$output"
 tail --pid="$eval_pid" -n 20 -f "$output/eval.log"
