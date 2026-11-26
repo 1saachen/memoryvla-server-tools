@@ -62,14 +62,18 @@ def main():
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("data", type=Path, help="Original NPZ split directories")
     parser.add_argument("output", type=Path)
+    parser.add_argument("--split", choices=("train", "val", "test"),
+                        help="Probe one split (default: train and val)")
     args = parser.parse_args()
     checkpoint, data = args.checkpoint.resolve(), args.data.resolve()
-    cases = [data / split / "order2_episode00000.npz" for split in ("train", "val")]
+    splits = (args.split,) if args.split else ("train", "val")
+    cases = [data / split / "order2_episode00000.npz" for split in splits]
     for path in [checkpoint, *cases]:
         if not path.is_file():
             raise FileNotFoundError(path)
     stats_path = checkpoint.parents[1] / "dataset_statistics.json"
     bounds = json.loads(stats_path.read_text(encoding="utf-8"))["custom_finetuning"]["action"]
+    low, high = np.asarray(bounds["q01"][:6]), np.asarray(bounds["q99"][:6])
     args.output.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable, "-u", str(Path(__file__).with_name("eval_buttons.py").resolve()),
@@ -89,12 +93,20 @@ def main():
                 np.savez_compressed(args.output / f"{split}_actions.npz",
                                     expert=expert, predicted=predicted)
                 results[split] = summarize_actions(expert, predicted)
-                clipped = (expert[:, :6] < np.asarray(bounds["q01"][:6])) | (
-                    expert[:, :6] > np.asarray(bounds["q99"][:6])
-                )
+                clipped = (expert[:, :6] < low) | (expert[:, :6] > high)
                 results[split]["expert_outside_q01_q99_pct_by_axis"] = (
                     100 * clipped.mean(axis=0)
                 ).round(2).tolist()
+                expert_xyz = expert[:, :3]
+                prediction_error = predicted[:, :3] - expert_xyz
+                clipping_error = np.clip(expert_xyz, low[:3], high[:3]) - expert_xyz
+                results[split]["approach_prefixes"] = {
+                    count: {
+                        "pred_minus_expert_xyz_mm": (1000 * prediction_error[:count].sum(axis=0)).round(2).tolist(),
+                        "clipped_minus_expert_xyz_mm": (1000 * clipping_error[:count].sum(axis=0)).round(2).tolist(),
+                    }
+                    for count in (10, 20, 40) if count <= len(expert)
+                }
                 print(f"{split} {json.dumps(results[split])}", flush=True)
         finally:
             policy.stdin.close()
