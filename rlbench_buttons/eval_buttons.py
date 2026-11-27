@@ -236,6 +236,7 @@ def evaluate(args):
                         with np.load(path, allow_pickle=False) as demo_file:
                             seed = int(demo_file["seed"].item())
                             layout = demo_file["layout"]
+                            layout_scale = float(demo_file.get("layout_scale", 1.0))
                             saved_order = tuple(int(button) for button in demo_file["order"])
                             saved_instruction = str(demo_file["instruction"].item())
                             if args.first_press_handoff:
@@ -252,6 +253,7 @@ def evaluate(args):
                         # Reproduce the collector's reset, including any planner retry.
                         np.random.seed(seed)
                         env_task.set_variation(order)
+                        task.layout_scale = layout_scale
                         task.scoring_rollout = False
                         task.peak_displacement = None
                         demo = env_task.get_demos(1, live_demos=True, max_attempts=2)[0]
@@ -331,6 +333,8 @@ def evaluate(args):
                             "gripper_control": gripper_control,
                             "press_events": [[t, COLORS[i]] for t, i in task.events],
                             "layout_seed": seed, "policy_seed": policy_seed,
+                            "layout_scale": layout_scale,
+                            "first_button_correct": score_presses(expected_order[:1], task.events) == 30,
                             "steps": steps, "error": error,
                         }
                         if args.first_press_handoff:
@@ -339,7 +343,6 @@ def evaluate(args):
                                 expert_steps=prefix_steps,
                                 handoff_gripper=gripper_control,
                                 handoff_pose_error_mm=handoff_pose_error_mm,
-                                first_button_correct=score_presses((first_button,), task.events) == 30,
                                 first_button_peak_mm=float(1000 * task.peak_displacement[first_button]),
                                 end_reason=(
                                     "invalid_action" if error is not None else "button_press" if task.events
@@ -357,7 +360,6 @@ def evaluate(args):
                             )
                         if args.near_start:
                             row.update(near_layouts[path])
-                            row["first_button_correct"] = score_presses(expected_order[:1], task.events) == 30
                         rows.append(row)
                         line = json.dumps(row)
                         print(line, file=episodes, flush=True)
@@ -370,6 +372,8 @@ def evaluate(args):
                     policy.terminate()
     summary = {
         "checkpoint": str(args.checkpoint), "split": "test",
+        "data": str(args.data.resolve()),
+        "first_button_correct": sum(row["first_button_correct"] for row in rows),
         "unnorm_key": UNNORM_KEY, "chunk_steps": args.chunk_steps,
         "mem_length": mem_length, "instruction_style": args.instruction_style,
         "gripper_control": gripper_control,
@@ -382,7 +386,6 @@ def evaluate(args):
             mode="first_press_handoff",
             handoff_gripper=gripper_control,
             handoff_actions_before_press=HANDOFF_LEAD,
-            first_button_correct=sum(row["first_button_correct"] for row in rows),
             episodes=len(rows),
         )
     else:
@@ -391,8 +394,7 @@ def evaluate(args):
         summary["per_order"] = {str(order): summarize([r for r in rows if r["order_id"] == order])
                                 for order in selected_orders}
     if args.near_start:
-        summary.update(layout_selection="near_start",
-                       first_button_correct=sum(row["first_button_correct"] for row in rows))
+        summary["layout_selection"] = "near_start"
     summary_file = args.output / "summary.json"
     temporary = summary_file.with_suffix(".tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

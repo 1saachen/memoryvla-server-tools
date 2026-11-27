@@ -162,6 +162,15 @@ bash "$PLAN/collect_batch.sh" "$WORK"
 
 参数可依次指定每种顺序的训练、验证、测试条数，例如 `bash "$PLAN/collect_batch.sh" "$WORK" 50 10 10`。要另建一套数据时，通过 `BUTTONS_OUTPUT_DIR` 指定新的目录，导出时也要相应设置 `--source` 和新的 `--data-root`。若单条轨迹耗尽默认的 12 次规划与回放尝试，可在原命令前加 `BUTTONS_ATTEMPTS=30` 继续。
 
+要把按钮收进原采样区的中央，设 `BUTTONS_LAYOUT_SCALE=0.7`。采样区的横向和纵向宽度各保留 70%，每条轨迹独立采样，继续使用 10 cm 的最小按钮间距。训练、验证和测试使用独立的种子序列。下面分别采集 1,800、120、120 条。如需试采，可先用 `1 1 1`，之后以相同布局参数和正式条数续采。
+
+```bash
+BUTTONS_OUTPUT_DIR="$WORK/data/center70" BUTTONS_LAYOUT_SCALE=0.7 BUTTONS_SEED=20261127 \
+  bash "$PLAN/collect_batch.sh" "$WORK" 300 20 20
+```
+
+用 VirtualGL 时通过 `BUTTONS_RENDER_EGL` 指定已验证的 EGL 设备，并可用 `SIM_PYTHON` 指定仿真 Python。给多个进程分别设置互不重叠的 `BUTTONS_ORDERS`，例如 `"0 1"`、`"2 3"`、`"4 5"`，可以并行写入同一个数据目录。每个进程核对自己负责的顺序并单独记录日志。
+
 要在同一桌面上分别采集先按蓝、绿、粉的示范，用 `collect.py --shared-layout --split train --per-order 1 --orders 0 2 4 --output <新目录>`。采集器为同一布局内的顺序复用种子，逐条验收按键顺序和回位，并核对按钮位置与机械臂起始关节状态。省略 `--orders` 时，每个布局采齐六种顺序。`--per-order 20` 表示采 20 个布局。加 `--resume` 可用相同输出目录和参数续跑，部分写入的布局按已保存的种子续采。以日志中的 `Shared collection complete` 确认全部轨迹已保存。
 
 确认三组计数后，切回训练环境导出 RLDS。默认应报告 1,200 条训练轨迹，验证和测试轨迹保留为 NPZ。
@@ -197,6 +206,8 @@ bash "$PLAN/run_eval.sh" "$WORK" "$checkpoint" 4 egl5 1
 最后的 `1` 表示每种顺序先跑一条，共 6 回合。看到输出目录下的 `summary.json` 后，将 `1` 换成 `20` 评测完整的 120 条测试布局。启动器在后台运行，退出日志跟踪后仍会继续。每个回合的布局、实际按键、成功标记和分数写入 `episodes.jsonl`。全部回合结束后，`summary.json` 记录整体及各顺序的成功数、总数和平均分。
 
 评测按数据文件指定的变体复位，并核对保存的按键顺序、布局和指令。每回合开始前，`eval.log` 会输出 `Verified` 和实际指令。任何一项不匹配都会停止评测。
+
+使用中央布局测试集时，在评测命令前设 `BUTTONS_DATA_DIR="$WORK/data/center70"`。评测会根据每条示范保存的采样范围复现按钮位置，并在 `summary.json` 记录数据目录、首键正确数、完整成功率和平均分。
 
 默认每次推理后执行四个动作。对照试验可在启动器前设 `BUTTONS_CHUNK_STEPS=1`，它会在每个动作后重新取图并推理。`summary.json` 的 `chunk_steps` 记录实际设置。
 

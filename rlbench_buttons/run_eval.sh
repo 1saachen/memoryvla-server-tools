@@ -7,6 +7,7 @@ if (( $# < 4 || $# > 5 )); then
 fi
 
 work="$(realpath -- "$1")"
+data="$(realpath -- "${BUTTONS_DATA_DIR:-$work/data/full}")"
 checkpoint="$(realpath -- "$2")"
 model_gpu="$3"
 render_egl="$4"
@@ -96,7 +97,7 @@ fi
 mkdir -p "$work/evals"
 output="$(mktemp -d "$work/evals/$output_kind-$(date +%Y%m%d-%H%M%S).XXXXXX")"
 nohup xvfb-run -a -s '-screen 0 1024x768x24' "$vgl" -d "$render_egl" \
-    "$sim_python" -u "$script_dir/eval_buttons.py" --data "$work/data/full" \
+    "$sim_python" -u "$script_dir/eval_buttons.py" --data "$data" \
     --checkpoint "$checkpoint" --output "$output" --model-repo "$model_repo" \
     --model-python "$model_python" --model-gpu "$model_uuid" --per-order "$per_order" \
     "${eval_options[@]}" \

@@ -9,12 +9,13 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 from PIL import Image
 from demo_reset import reset_demo
+from layout import restrict_to_center
 from pyrep.objects.dummy import Dummy
 from pyrep.objects.object import Object
 from rlbench.action_modes.action_mode import MoveArmThenGripper
 from rlbench.action_modes.arm_action_modes import EndEffectorPoseViaIK
 from rlbench.action_modes.gripper_action_modes import Discrete
-from rlbench.backend.exceptions import InvalidActionError, TaskEnvironmentError
+from rlbench.backend.exceptions import BoundaryError, InvalidActionError, TaskEnvironmentError
 from rlbench.backend.spawn_boundary import SpawnBoundary
 from rlbench.environment import Environment
 from rlbench.observation_config import ObservationConfig
@@ -33,6 +34,8 @@ HOME_ROT_TOL = 0.08  # radians
 
 class PushButtons(StockPushButtons):
     """Keep the class name so RLBench loads the stock push_buttons.ttm."""
+
+    layout_scale = 1.0
 
     def init_task(self):
         super().init_task()
@@ -57,6 +60,7 @@ class PushButtons(StockPushButtons):
         self.home_ticks = {}
         self._at_home = False
         boundary = SpawnBoundary([self.boundaries])
+        restrict_to_center(boundary, self.layout_scale)
         for button, top, wrap, rgb in zip(
             self.target_buttons, self.target_topPlates, self.target_wraps, PALETTE
         ):
@@ -195,6 +199,7 @@ def collect_episode(env_task, variation, stride):
         home_indices=np.r_[0, home_indices],
         sim_ticks=np.asarray(ticks),
         layout=layout,
+        layout_scale=np.asarray(task.layout_scale),
     )
 
 
@@ -252,7 +257,8 @@ def collect_shared_layouts(env_task, args, output, domain, settings):
                 raise FileExistsError(f"{path} exists. Use --resume or a fresh directory.")
             with np.load(path, allow_pickle=False) as saved:
                 if ("shared_layout" not in saved or not bool(saved["shared_layout"])
-                        or tuple(saved["collection_settings"]) != settings):
+                        or tuple(saved["collection_settings"]) != settings
+                        or float(saved.get("layout_scale", 1.0)) != args.layout_scale):
                     raise ValueError(f"{path}: shared layout collection settings differ from this run.")
                 if reference is None:
                     reference = {key: saved[key] for key in ("layout", "arm_joints", "gripper_closed")}
@@ -276,7 +282,7 @@ def collect_shared_layouts(env_task, args, output, domain, settings):
             try:
                 records = collect_shared_layout(env_task, missing, args.stride, seed, reference)
                 break
-            except (RuntimeError, InvalidActionError, TaskEnvironmentError) as err:
+            except (RuntimeError, BoundaryError, InvalidActionError, TaskEnvironmentError) as err:
                 print(f"Shared layout {episode + 1}, attempt {attempt + 1}: {err}", flush=True)
         else:
             raise RuntimeError(f"Shared layout {episode + 1} failed after {args.attempts} attempts")
@@ -303,6 +309,8 @@ def main():
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--layout-scale", type=float, default=1.0,
+                        help="Fraction of the original spawn width and depth, centered in place")
     parser.add_argument("--save-check-frames", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--shared-layout", action="store_true",
@@ -312,6 +320,8 @@ def main():
         parser.error("Counts must be positive and the seed must be nonnegative.")
     if any(i not in range(6) for i in args.orders):
         parser.error("Order indices must be in 0..5.")
+    if not 0.0 < args.layout_scale <= 1.0:
+        parser.error("--layout-scale must be in (0, 1].")
 
     output = args.output / args.split
     if args.shared_layout and len(set(args.orders)) != len(args.orders):
@@ -323,6 +333,7 @@ def main():
     env.launch()
     try:
         env_task = env.get_task(PushButtons)
+        env_task._task.layout_scale = args.layout_scale
         if args.shared_layout:
             import fcntl
 
@@ -338,7 +349,9 @@ def main():
                     if not args.resume:
                         raise FileExistsError(f"{path} exists. Use --resume or a fresh directory.")
                     with np.load(path, allow_pickle=False) as saved:
-                        if tuple(saved["collection_settings"]) != settings:
+                        if (bool(saved.get("shared_layout", False))
+                                or tuple(saved["collection_settings"]) != settings
+                                or float(saved.get("layout_scale", 1.0)) != args.layout_scale):
                             raise ValueError(f"{path}: collection settings differ from this run.")
                     print(f"Already collected: {path}", flush=True)
                     continue
@@ -350,7 +363,7 @@ def main():
                     try:
                         record = collect_episode(env_task, order, args.stride)
                         break
-                    except (RuntimeError, InvalidActionError, TaskEnvironmentError) as err:
+                    except (RuntimeError, BoundaryError, InvalidActionError, TaskEnvironmentError) as err:
                         print(f"{name} attempt {attempt + 1}: {err}", flush=True)
                 else:
                     raise RuntimeError(f"{name} failed after {args.attempts} attempts.")
