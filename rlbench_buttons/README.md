@@ -194,6 +194,23 @@ GPUS=4 SAVE_INTERVAL=1000 bash "$PLAN/train.sh" "$MEMVLA_REPO" "$WORK/rlds/full"
 
 如果后续要比较 16 与 24 条记忆容量，并希望训练时用到第 17–24 条历史，两组均可设 `GROUP_SIZE=32`，仅改变 `MEM_LENGTH`。每卡 batch 同步增至 32 帧，需要单独做显存短跑。
 
+### 中央 50% 随机布局自动采集并训练
+
+`collect_and_train.sh` 使用 `egl4`、`egl5`、`egl6` 采集或续采 `data/center50`，训练、验证和测试各为 1,800、120、120 条。三路均通过计数检查后，脚本用 MemoryVLA 环境在 CPU 上导出训练 RLDS，再用传入的初始化权重启动训练。默认使用 GPU 0、1、2、stream、每卡 16 帧和 256 条记忆，训练 5,000 步，每 1,000 步保存一次。用 `BUTTONS_TRAIN_GPUS` 指定分配到的卡。脚本使用日志目录名作为训练运行名与 RLDS 目录名。
+
+```bash
+mkdir -p "$WORK/logs"
+log_dir=$(mktemp -d "$WORK/logs/buttons-center50.XXXXXX")
+nohup env SIM_PYTHON="$SIM_PYTHON" BUTTONS_TRAIN_GPUS=0,1,2 \
+  bash "$PLAN/collect_and_train.sh" "$WORK" "$INITIAL_PT" "$log_dir" 5000 \
+  > "$log_dir/pipeline.log" 2>&1 < /dev/null &
+pid=$!
+printf '%s\n' "$pid" > "$log_dir/pipeline.pid"
+tail --pid="$pid" -f "$log_dir/pipeline.log"
+```
+
+如果已有采集正在写入 `data/center50`，在启动前把 `BUTTONS_WAIT_LOG_DIR` 导出为那次采集打印的 `Logs=` 目录。脚本会等待其中的采集进程结束，再核对和续采数据。每路采集、RLDS 导出和训练的进度分别写入 `egl4.log`、`egl5.log`、`egl6.log`、`export.log`、`train.log`。如需重跑，重新执行启动块生成一份日志目录，已有有效的原始轨迹可续用。训练成功时，`pipeline.log` 会打印最终 checkpoint 的路径。
+
 ## 6. 闭环评测
 
 在已经激活 `buttons-sim` 的终端执行。启动器调用独立的 `memvla` Python 进程加载训练产物，通过同一运行目录的 `dataset_statistics.json` 反归一化 `custom_finetuning` 动作。第三个参数是推理卡的 `nvidia-smi` 编号，第四个参数是已验证的 VirtualGL EGL 设备。若 Python 安装在其他位置，使用 `SIM_PYTHON` 或 `MEMVLA_PYTHON` 指定绝对路径。
